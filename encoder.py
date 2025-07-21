@@ -53,9 +53,9 @@ def encode_and_store_video(input_file, output_file, width=1280, height=720):
     
     # Save stored packets to file
     with open(output_file, 'wb') as f:
-        for frame_count, data in stored_packets:
+        for frame_count, data in enumerate(stored_packets):
             # Write frame count and data length as metadata
-            f.write(struct.pack('>I', len(data)))
+            f.write(struct.pack('>Q', len(data)))
             f.write(data)
     
     return stored_packets

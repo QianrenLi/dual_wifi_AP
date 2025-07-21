@@ -13,13 +13,12 @@ def send_packets(packets_file, udp_ip, udp_port, target_fps=30):
     with open(packets_file, 'rb') as f:
         while True:
             # Read metadata (frame_count and data length)
-            metadata = f.read(4)
+            metadata = f.read(8)
             if not metadata:
                 break
-            data_length = struct.unpack('>I', metadata)
-            
+            data_length = struct.unpack('>Q', metadata)
             # Read the actual data
-            data = f.read(data_length)
+            data = f.read(data_length[0])
             stored_packets.append(data)
     
     frame_interval = 1.0 / target_fps
@@ -57,4 +56,4 @@ def send_packets(packets_file, udp_ip, udp_port, target_fps=30):
     
     sock.close()
     
-send_packets('video/4096_2160_25fps.bin', "10.16.60.57", 5005, 25)
+send_packets('video/4096_2160_25fps.bin', "127.0.0.1", 5005, 25)
