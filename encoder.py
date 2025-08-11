@@ -19,6 +19,7 @@ def encode_and_store_video(input_file, output_file, width=1280, height=720):
         'crf': '23',
         'g': str(int(fps)),
     }
+    interval_ns = int(1e9 / fps)
     
     stored_packets = []
     frame_count = 0
@@ -55,10 +56,12 @@ def encode_and_store_video(input_file, output_file, width=1280, height=720):
     with open(output_file, 'wb') as f:
         for frame_count, data in enumerate(stored_packets):
             # Write frame count and data length as metadata
-            f.write(struct.pack('>Q', len(data)))
+            f.write(struct.pack('>QQ', interval_ns, len(data)))
             f.write(data)
+            print(len(data))
     
     return stored_packets
 
 # encode_and_store_video('video/gn.mp4', 'video/gn.bin')
+# encode_and_store_video('video/4096_2160_25fps.mp4', 'video/640_360_25fps.bin', width=640, height=360)
 encode_and_store_video('video/4096_2160_25fps.mp4', 'video/4096_2160_25fps.bin', width=4096, height=2160)

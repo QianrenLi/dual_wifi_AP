@@ -53,36 +53,22 @@ frame_buffer = FrameBuffer()
 frame_chunks = defaultdict(dict)
 
 def udp_receiver():
+    idx = 0
     while True:
+        # Receive a complete frame directly
         data, _ = sock.recvfrom(65536)
         
-        # Parse header: frame_count, chunk_idx, total_chunks, chunk_size
-        header = data[:16]
-        frame_count, chunk_idx, total_chunks, chunk_size = struct.unpack('>IIII', header)
-        payload = data[16:16+chunk_size]
-        
-        # Store chunk
-        frame_chunks[frame_count][chunk_idx] = payload
-        
-        # Check if we have all chunks
-        if len(frame_chunks[frame_count]) == total_chunks:
-            # Reassemble frame
-            full_frame = b''.join([frame_chunks[frame_count][i] 
-                                 for i in sorted(frame_chunks[frame_count].keys())])
+        try:
+            packet = av.packet.Packet(data)  # Treat data as a complete frame
+            frames = codec.decode(packet)
             
-            try:
-                packet = av.packet.Packet(full_frame)
-                frames = codec.decode(packet)
-                
-                for frame in frames:
-                    frame = frame.to_ndarray(format='bgr24')
-                    frame_buffer.add_frame(frame, frame_count)
-                
-                del frame_chunks[frame_count]
-                
-            except (av.error.EOFError, av.error.InvalidDataError) as e:
-                print(f"Decoding error: {e}")
-                del frame_chunks[frame_count]
+            for frame in frames:
+                frame = frame.to_ndarray(format='bgr24')
+                frame_buffer.add_frame( frame, frame_count = idx)
+                idx += 1
+            
+        except (av.error.EOFError, av.error.InvalidDataError) as e:
+            print(f"Decoding error: {e}")
 
 
 def video_display(target_width = 1280, target_height = 720): #width=1280, height=720
@@ -102,7 +88,7 @@ def video_display(target_width = 1280, target_height = 720): #width=1280, height
             frame_buffer.to_display_frame_id += 1
             frame_buffer.last_display_time = time.time()
             target_time = frame_buffer.last_display_time + (1 / frame_buffer.fps)
-        
+            
         # Calculate when this frame should be displayed
         
         if first_frame_time is not None:

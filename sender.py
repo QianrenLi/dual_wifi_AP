@@ -55,5 +55,5 @@ def send_packets(packets_file, udp_ip, udp_port, target_fps=30):
         print(f"Frame {frame_count} | {mbps:.2f} Mbps | Sent at {time.strftime('%H:%M:%S')}")
     
     sock.close()
-    
-send_packets('video/4096_2160_25fps.bin', "127.0.0.1", 5005, 25)
+
+send_packets('video/1280_720_25fps.bin', "192.168.3.8", 5005, 25)
