@@ -1,5 +1,2 @@
 video/*
-exp_trace/*/*.txt
-exp_trace/*/*.csv
-exp_trace/*/*.png
-exp_trace/*/*/*.png
+exp_trace/*/*
