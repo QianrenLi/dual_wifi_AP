@@ -142,12 +142,12 @@ def _recv_file(sock:socket.socket, file_glob:str) -> None:
                     fd.write(_chunk)
                 fd.flush()
                 ## (3) copy to codebase
-                if Path(file_name).match(file_glob):
-                    Path(file_name).parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(fd.name, file_name)
-                    print(f'"{file_name}" received.')
-                else:
-                    print(f'"{file_name}" rejected.')
+                # if Path(file_name).match(file_glob):
+                Path(file_name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(fd.name, file_name)
+                print(f'"{file_name}" received.')
+                # else:
+                #     print(f'"{file_name}" rejected.')
     except Exception as e:
         sock.settimeout(None)
         raise e
@@ -410,7 +410,9 @@ class Handler:
             if basename not in codebase:
                 raise CodebaseNonExistException(basename)
             ##
-            file_glob = codebase[basename]
+            entry = codebase[basename]
+            file_glob = str(Path(entry) / '**/*') if Path(entry).is_dir() else entry
+            # file_glob = codebase[basename]
             _send_file(conn, name, file_glob)
             return {'res':True}
 
@@ -422,12 +424,57 @@ class Handler:
             else:
                 _send(self.handler.sock, {'res':True})
             ##
-            file_glob = codebase[basename]
+            entry = codebase[basename]
+            file_glob = str(Path(entry) / '**/*') if Path(entry).is_dir() else entry
             _recv_file(self.handler.sock, file_glob)
             return {'res':True}
         pass
 
     pass
+
+    class sync_file_pull(Request):
+        """
+        Pull files from CLIENT to SERVER.
+        Use file_glob to match files to send.
+        
+        Console/Connector args:
+            file_glob    : str     # pattern to match files on the client side
+        """
+
+        def proxy(self, conn, name: str, _task_pool: dict, args: str) -> dict:
+            # 1) Handle control message first (acknowledgment)
+            res = super().proxy(conn, name, _task_pool, args)
+            if 'err' in res:
+                return res
+
+            # 2) Now receive the file information after acknowledgment
+            p_args = json.loads(args)['args']
+            file_glob = p_args.get('file_glob', '')
+
+            file_glob = str(Path(file_glob) / '**/*') if Path(file_glob).is_dir() else file_glob
+
+            # 3) Receive the files
+            _recv_file(conn, file_glob)
+            res = _recv(conn).decode()
+            return {'res': True}
+
+
+        def client(self, args: dict) -> dict:
+            # Parse client-side sources (using file_glob) and server-side targets
+            file_glob = args.get('file_glob', '')  # The glob pattern from client-side
+
+            if not file_glob:
+                raise InvalidRequestException("`file_glob` must be provided.")
+
+            _send(self.handler.sock, {'res': True})  # Handshake
+
+            entry = args.get('file_glob', '')
+            file_glob = str(Path(entry) / '**/*') if Path(entry).is_dir() else entry
+            _send_file(self.handler.sock, self.handler.name, file_glob)
+
+            return {'res': True}
+
+
 
 class SlaveDaemon(Handler):
     def __init__(self, port:int, manifest:dict, addr='', alt_name=''):
@@ -748,6 +795,11 @@ class Connector(Handler):
             dict: The response information.
         """
         return self.handle('sync_code', {'basename':basename})
+    
+    def sync_file_pull(self, file_glob):
+        """Pull explicit files from the connected client to the server using a glob pattern."""
+        return self.handle('sync_file_pull', {'file_glob': file_glob})
+
 
     def execute(self, function:str, parameters:dict={}, timeout:float=-1) -> str:
         """Execute the function asynchronously, return instantly with task id.
