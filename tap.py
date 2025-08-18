@@ -127,31 +127,35 @@ def _send_file(sock:socket.socket, name:str, file_glob:str) -> None:
     _send(sock, '') #finalize sending
     pass
 
-def _recv_file(sock:socket.socket, file_glob:str) -> None:
+def _recv_file(sock: socket.socket, file_glob: str) -> None:
+    prev_timeout = sock.gettimeout()
     try:
-        sock.settimeout(1.0)
+        # Block during file transfer; rely on the explicit terminators ('@end' and '')
+        sock.settimeout(None)
+
         while True:
+            # (1) recv file name (length-prefixed); empty string ends the batch
+            file_name = _recv(sock).decode()
+            if not file_name:
+                break
+
+            # (2) recv file body until '@end'
             with NamedTemporaryFile() as fd:
-                ## (1) recv file name
-                file_name = _recv(sock).decode()
-                if not file_name: break
-                ## (2) recv chunks until end
                 while True:
                     _chunk = _recv(sock)
-                    if _chunk==b'@end': break
+                    if _chunk == b'@end':
+                        break
                     fd.write(_chunk)
                 fd.flush()
-                ## (3) copy to codebase
-                # if Path(file_name).match(file_glob):
+
+                # (3) write out to destination path
                 Path(file_name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(fd.name, file_name)
                 print(f'"{file_name}" received.')
-                # else:
-                #     print(f'"{file_name}" rejected.')
-    except Exception as e:
-        sock.settimeout(None)
-        raise e
-    pass
+    finally:
+        # CRITICAL: restore whatever the socket had before
+        sock.settimeout(prev_timeout)
+
 
 def _extract(cmd:str, format:str):
     try:
@@ -414,7 +418,11 @@ class Handler:
             file_glob = str(Path(entry) / '**/*') if Path(entry).is_dir() else entry
             # file_glob = codebase[basename]
             _send_file(conn, name, file_glob)
-            return {'res':True}
+            try:
+                final = json.loads(_recv(conn).decode())
+            except Exception:
+                final = {'res': True}  # tolerate older clients
+            return final
 
         def client(self, args: dict) -> dict:
             basename = args['basename']
@@ -432,7 +440,7 @@ class Handler:
 
     pass
 
-    class sync_file_pull(Request):
+    class sync_file(Request):
         """
         Pull files from CLIENT to SERVER.
         Use file_glob to match files to send.
@@ -450,13 +458,20 @@ class Handler:
             # 2) Now receive the file information after acknowledgment
             p_args = json.loads(args)['args']
             file_glob = p_args.get('file_glob', '')
-
+            is_pull = p_args.get('is_pull', True)
             file_glob = str(Path(file_glob) / '**/*') if Path(file_glob).is_dir() else file_glob
 
             # 3) Receive the files
-            _recv_file(conn, file_glob)
-            res = _recv(conn).decode()
-            return {'res': True}
+            if is_pull:
+                _recv_file(conn, file_glob)
+            else:
+                _send_file(conn, name, file_glob)
+                
+            try:
+                final = json.loads(_recv(conn).decode())
+            except Exception:
+                final = {'res': True}  # tolerate older clients
+            return final
 
 
         def client(self, args: dict) -> dict:
@@ -469,9 +484,15 @@ class Handler:
             _send(self.handler.sock, {'res': True})  # Handshake
 
             entry = args.get('file_glob', '')
+            is_pull = args.get('is_pull', True)
             file_glob = str(Path(entry) / '**/*') if Path(entry).is_dir() else entry
-            _send_file(self.handler.sock, self.handler.name, file_glob)
-
+            
+            if is_pull:
+                # Pull files from client to server
+                _send_file(self.handler.sock, self.handler.name, file_glob)
+            else:
+                _recv_file(self.handler.sock, file_glob)
+            
             return {'res': True}
 
 
@@ -796,9 +817,9 @@ class Connector(Handler):
         """
         return self.handle('sync_code', {'basename':basename})
     
-    def sync_file_pull(self, file_glob):
+    def sync_file(self, file_glob, is_pull:bool=True):
         """Pull explicit files from the connected client to the server using a glob pattern."""
-        return self.handle('sync_file_pull', {'file_glob': file_glob})
+        return self.handle('sync_file', {'file_glob': file_glob, 'is_pull': is_pull})
 
 
     def execute(self, function:str, parameters:dict={}, timeout:float=-1) -> str:

@@ -18,12 +18,10 @@
             "description": "Send the data to receiver.",
             "parameters": {
                 "config" : "data/test.json",
-                "duration": 10,
-                "ipc-port": 11112,
-                "mon-mac" : "--mon-mac"
+                "duration": 10
             },
             "commands": [
-                "(cd stream-replay; ./target/release/stream-replay-tx $config $duration --ipc-port $ipc-port $mon-mac)"
+                "(cd stream-replay; ./target/release/stream-replay-tx $config $duration --mon-mac)"
             ]
         },
         "receive_file": {

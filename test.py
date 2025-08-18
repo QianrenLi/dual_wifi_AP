@@ -9,8 +9,7 @@ conn = Connector()
 duration = 5
 exp_name = "local_exp"
 
-# tx_srcs, flows = create_transmission_config("local_exp", conn, is_update=True)
-tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=False)
+tx_srcs, flows = create_transmission_config("local_exp", conn, is_update=True)
 
 start_time = time.time()
 
@@ -44,11 +43,9 @@ print(res)
 log_dir = "stream-replay/logs"
 for client in conn.list_all():
     file_name = flow_to_rtt_log(flow)
-    Connector(client).sync_file_pull(f'{log_dir}/{file_name}')
+    Connector(client).sync_file(f'{log_dir}/{file_name}')
     # rename
     os.makedirs(f'exp_trace/{exp_name}', exist_ok=True)
     os.rename(f'{log_dir}/{file_name}', f'exp_trace/{exp_name}/{file_name}')
-    
-    
-    
+
 print( "Execution time: ", time.time() - start_time)

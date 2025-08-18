@@ -48,14 +48,14 @@ def create_transmission_config(config_name, conn: Connector, is_update=False):
     if is_update:         
         ## Sync the config_name folder to all clients
         for client in clients:
-            Connector(client).sync_code('configs')
+            Connector(client).sync_file(folder, is_pull=False)
             
     return tx_srcs, flows
 
 if __name__ == "__main__":
     conn = Connector()
     for client in conn.list_all():
-        Connector(client).sync_file_pull("stream-replay/logs/test.txt")
+        Connector(client).sync_file("stream-replay/logs/test.txt", is_pull=False)
         
     create_transmission_config("system_verify", conn)
     
