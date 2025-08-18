@@ -1,2 +1,6 @@
 video/*
 exp_trace/*/*
+config/*
+
+__pycache__/
+

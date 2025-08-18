@@ -1,0 +1,193 @@
+{
+    "name": "",
+    "codebase": {
+        "manifest": "manifest.json",
+        "tap": "tap.py",
+        "util": "util",
+        "tools": "tools",
+        "data": "stream-replay/data",
+        "core": "stream-replay/core",
+        "rx": "stream-replay/rx",
+        "tx": "stream-replay/tx",
+        "android": "stream-replay/android",
+        "stream-replay": "stream-replay/*"
+    },
+    "functions": {
+        "receive_file": {
+            "description": "Run stream-replay with default manifest file.",
+            "parameters": {
+                "duration": 10,
+                "port": 0
+            },
+            "commands": [
+                "(cd stream-replay; ./target/release/stream-replay-rx $port $duration)"
+            ],
+            "outputs": {
+                "throughput": {
+                    "cmd": "echo $output_0",
+                    "format": "Average Throughput: (\\d+\\.\\d+) Mbps"
+                } 
+            }
+        },
+        "receive_with_rtt": {
+            "description": "Run stream-replay with default manifest file.",
+            "parameters": {
+                "duration": 10,
+                "port": 0,
+                "calc_rtt": "",
+                "tos": 100,
+                "src_ipaddrs": "--src_ipaddrs=127.0.0.1"
+            },
+            "commands": [
+                "(cd stream-replay; ./target/release/stream-replay-rx $port $duration calc-rtt $src_ipaddrs)"
+            ],
+            "outputs": {
+                "throughput": {
+                    "cmd": "echo $output_0",
+                    "format": "Average Throughput: (\\d+\\.\\d+) Mbps"
+                },
+                "packet_loss": {
+                    "cmd": "echo $output_0",
+                    "format": "Packet loss rate: (\\d+\\.\\d+)"
+                },
+                "stuttering rate":{
+                    "cmd": "echo $output_0",
+                    "format": "Stuttering rate: (\\d+\\.\\d+)"
+                }
+            }
+        },
+        "warm_up":{
+            "description": "Cargo build stream-replay.",
+            "parameters":{},
+            "commands": [
+                "(cd stream-replay; cargo build --release)"
+            ]
+        },
+        "read_mcs":{
+            "description":"Compute the mcs value",
+            "parameters":{
+                "ifname": ""
+            },
+            "outputs": {
+                "mcs_value": {
+                    "cmd":"cd tools; python3 read_mcs.py $ifname",
+                    "format":"TX bitrate for interface:\\s+(\\d+(\\.\\d+)?)"
+                }
+            }
+        },
+        "read_rtt":{
+            "description": "Read rtt",
+            "parameters": {
+                "port" : 0,
+                "tos" : 100
+            },
+            "outputs": {
+                "rtt": {
+                    "cmd":"(cd tools; python3 read_rtt.py -f ../stream-replay/logs/rtt-$port@$tos.txt ; rm -f stream-replay/logs/rtt-$port@$tos.txt)",
+                    "format":"(\\d+\\.\\d+)"
+                }
+            }
+        },
+        "read_ip_addr":{
+            "description": "read p2p or wlan ipv4 addr",
+            "parameters":{
+                "file_name":"ifconfig_output.txt",
+                "keyword": "wlan"
+            },
+            "commands": [
+                "cd tools; python3 ip_extract.py"
+            ],
+            "outputs": {
+                "ip_addr": {
+                    "cmd": "echo $output_0",
+                    "format":"(.*)"
+                }
+            }
+        },
+        "set_interference":{
+            "description": "Set interference",
+            "parameters":{
+                "target_ip": "192.168.3.35",
+                "target_port": 5201,
+                "duration" : 50,
+                "mbps": 0
+            },
+            "commands": [
+                "cd tools; python3 env_inter.py -i $target_ip -p $target_port -t $duration -b $mbps"
+            ]
+        },
+        "send_file":{
+            "description": "Send file",
+            "parameters":{
+                "target_ip": "192.168.3.82",
+                "file_name": "../stream-replay/logs/*.txt"
+            },
+            "commands":[
+                "cd tools; python3 file_tx.py -i $target_ip -f $file_name"
+            ]
+        },
+        "abuse_manifest":{
+            "description": "abuse manifest",
+            "parameters":{
+                "cmd": "echo Test"
+            },
+            "commands":[
+                "$cmd"
+            ]
+        },
+        "config_network":{
+            "description": "config network for transmission",
+            "parameters":{
+                "interface": "",
+                "password": ""
+            },
+            "commands":[
+                "cd tools; echo $password | sudo -S python3 set_route.py -i $interface"
+            ],
+            "outputs": {
+                "cmd_return": {
+                    "cmd": "echo $output_0",
+                    "format":"(.*)"
+                }
+            }
+        },
+        "create_file":{
+            "description": "create new data file",
+            "parameters":{
+                "thru": 10,
+                "arrivalGap": 1,
+                "variance": 0.1,
+                "num": 1000,
+                "arrivalVar": 0.5,
+                "name": "test.npy"
+            },
+            "commands":[
+                "cd tools; python3 create_data.py --thru $thru --arrivalGap $arrivalGap --name $name --variance $variance --arrivalVar $arrivalVar --num $num; mv $name ../stream-replay/data/"
+            ]
+        },
+        "get_channel":{
+            "description": "get channel of specific interface",
+            "parameters":{
+                "interface": "wlan0"
+            },
+            "commands":[
+                "cd tools; python3 get_channel.py -i $interface"
+            ],
+            "outputs":{
+                "channel_info": {
+                    "cmd": "echo $output_0",
+                    "format":"(.*)"
+                }
+            }
+        },
+        "clean_up_rx":{
+            "description": "clean up stream-replay-rx",
+            "parameters":{
+                "password": ""
+            },
+            "commands":[
+                "echo $password | sudo -S killall stream-replay-rx"
+            ]
+        }
+    }
+}
