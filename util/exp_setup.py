@@ -2,6 +2,9 @@ import importlib.util
 from pathlib import Path
 import sys
 import os
+import json
+
+from util.flows import reshape_to_flows_by_port
 
 current = os.path.dirname(os.path.realpath(__file__))
 parent = os.path.dirname(current)
@@ -15,15 +18,7 @@ def load_config_file(config_name):
     spec.loader.exec_module(cfg)
     return cfg
 
-def create_log_file(folder, src, dest, stream_config):
-    filename = f"{folder}/{src}_{dest}.json"
-    with open(filename, "w") as f:
-        f.write(stream_config.to_json())
-    pass
-    
-    
-
-def create_transmission_config(config_name, conn: Connector):
+def create_transmission_config(config_name, conn: Connector, is_update=False):
     cfg = load_config_file(config_name)
     clients = Connector().list_all()
     for client in clients:
@@ -35,15 +30,28 @@ def create_transmission_config(config_name, conn: Connector):
         ip_addr = eval(result)
         ip_table[name] = ip_addr
     
-    folder = f"stream-replay/logs/{config_name}"
+    configs = cfg.exp_streams(ip_table)
+    flows = reshape_to_flows_by_port(configs)
+    
+    tx_srcs = {}
+    folder = f"stream-replay/data/configs/{config_name}"
     os.makedirs(folder, exist_ok=True)
     
-    configs = cfg.exp_streams(ip_table)
     for src, config in configs.items():
+        tx_srcs[src] = []
         for dest, stream_config in config.items():
-            create_log_file(folder, src, dest, stream_config)
+            data_path = f"{folder}/{src}_{dest}.json"
+            with open(data_path, "w") as f:
+                f.write(json.dumps(stream_config, indent=4))
+            tx_srcs[src].append(data_path)
     
-    
+    if is_update:         
+        ## Sync the config_name folder to all clients
+        for client in clients:
+            Connector(client).sync_code('configs')
+            
+    return tx_srcs, flows
+
 if __name__ == "__main__":
     conn = Connector()
     for client in conn.list_all():
@@ -51,5 +59,3 @@ if __name__ == "__main__":
         
     create_transmission_config("system_verify", conn)
     
-
-
