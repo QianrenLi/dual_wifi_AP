@@ -1,5 +1,6 @@
 import time
 import os
+from datetime import datetime
 
 from util.exp_setup import create_transmission_config
 from util.flows import flow_to_rtt_log
@@ -9,7 +10,7 @@ conn = Connector()
 duration = 5
 exp_name = "local_exp"
 
-tx_srcs, flows = create_transmission_config("local_exp", conn, is_update=True)
+tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=True)
 
 start_time = time.time()
 
@@ -41,11 +42,19 @@ print(res)
 
 ## Pull RTT logs
 log_dir = "stream-replay/logs"
-for client in conn.list_all():
+
+folder = f'exp_trace/{exp_name}/trial_{datetime.now().strftime("%Y%m%d-%H%M")}'
+
+for flow in flows.values():
+    client = flow.src_sta
     file_name = flow_to_rtt_log(flow)
     Connector(client).sync_file(f'{log_dir}/{file_name}')
     # rename
-    os.makedirs(f'exp_trace/{exp_name}', exist_ok=True)
-    os.rename(f'{log_dir}/{file_name}', f'exp_trace/{exp_name}/{file_name}')
+    os.makedirs(f'{folder}', exist_ok=True)
+    os.rename(f'{log_dir}/{file_name}', f'{folder}/{file_name}')
+    
+for tx, srcs in tx_srcs.items():
+    Connector(tx).sync_file('stream-replay/logs/recorder.txt')
+    os.rename('stream-replay/logs/recorder.txt', f'{folder}/recorder_{tx}.txt')
 
 print( "Execution time: ", time.time() - start_time)
