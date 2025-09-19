@@ -181,7 +181,9 @@ def _execute(name, task_pool, tid, config, params, timeout) -> None:
                 commands[i] = commands[i].replace(f'${k}', str(v))
         ##
         processes = [ SHELL_POPEN(cmd) for cmd in commands ]
+        print(commands)
         returns = [ proc.poll() for proc in processes ]
+        print(returns)
         _now = time.time()
         while None in returns and time.time() - _now < timeout:
             returns = [ proc.poll() for proc in processes ]
@@ -686,7 +688,7 @@ class Connector(Handler):
             self._initialize() #cleanup
             return outputs
 
-        def batch(self, client:str, function:str, parameters:dict={}, timeout:float=-1):
+        def batch(self, client:str, function:str, parameters:dict={}, timeout:float=-1, detached:bool=False):
             """Batch execution by simultaneously sending commands, then use `.apply` to apply send action.
 
             Args:

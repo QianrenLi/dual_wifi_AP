@@ -23,6 +23,10 @@ class Flow:
     tx_part: float
     calc_rtt: bool
     no_logging: bool
+    
+    @property
+    def flow_name(self) -> str:
+        return f"{self.port}@{self.tos}"
 
 def reshape_to_flows_by_port(cfg: Dict[str, Dict[str, dict]]) -> Dict[int, Flow]:
     """

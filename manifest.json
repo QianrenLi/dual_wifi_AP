@@ -3,6 +3,7 @@
     "codebase": {
         "manifest": "manifest.json",
         "tap": "tap.py",
+        "agent": "agent.py",
         "util": "util",
         "tools": "tools",
         "data": "stream-replay/data",
@@ -48,6 +49,43 @@
                     "format": "Stuttering rate: (\\d+\\.\\d+)"
                 }
             }
+        },
+        "receive_file_gui": {
+            "description": "Run stream-replay with default manifest file.",
+            "parameters": {
+                "duration": 10,
+                "port": 0,
+                "hyper_parameters": ""
+            },
+            "commands": [
+                "cd stream-replay; xterm -e ./target/release/stream-replay-rx $port $duration $hyper_parameters"
+            ],
+            "outputs": {
+                "throughput": {
+                    "cmd": "echo $output_0",
+                    "format": "Average Throughput: (\\d+\\.\\d+) Mbps"
+                },
+                "packet_loss": {
+                    "cmd": "echo $output_0",
+                    "format": "Packet loss rate: (\\d+\\.\\d+)"
+                },
+                "stuttering rate":{
+                    "cmd": "echo $output_0",
+                    "format": "Stuttering rate: (\\d+\\.\\d+)"
+                }
+            }
+        },
+        "start_agent":{
+            "description": "Run the agent to apply control and optimization.",
+            "parameters":{
+                "duration": 10,
+                "server_ip": "127.0.0.1",
+                "ipc_port": 11112,
+                "config_file": ""
+            },
+            "commands": [
+                "python agent.py --use-nn --server-ip $server_ip --server-port $ipc_port --local-port 12345 --config $config_file --sigma 0.15 --period 0.005 --duration $duration"
+            ]
         },
         "warm_up":{
             "description": "Cargo build stream-replay.",

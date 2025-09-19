@@ -3,4 +3,5 @@ exp_trace/*/*
 config/*
 
 __pycache__/
+logs/
 
