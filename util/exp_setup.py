@@ -30,7 +30,7 @@ def create_transmission_config(config_name, conn: Connector, is_update=False):
         ip_addr = eval(result)
         ip_table[name] = ip_addr
     
-    configs = cfg.exp_streams(ip_table)
+    configs = cfg.exp_streams(ip_table); policy_configs =cfg.policy_config()
     flows = reshape_to_flows_by_port(configs)
     
     tx_srcs = {}
@@ -44,6 +44,10 @@ def create_transmission_config(config_name, conn: Connector, is_update=False):
             with open(data_path, "w") as f:
                 f.write(json.dumps(stream_config, indent=4))
             tx_srcs[src].append(data_path)
+            
+            data_path = f"net_util/net_config/{src}_{dest}.json"
+            with open(data_path, "w") as f:
+                f.write(json.dumps(policy_configs[src][dest], indent=4))
     
     if is_update:         
         ## Sync the config_name folder to all clients
@@ -53,9 +57,18 @@ def create_transmission_config(config_name, conn: Connector, is_update=False):
     return tx_srcs, flows
 
 if __name__ == "__main__":
-    conn = Connector()
-    for client in conn.list_all():
-        Connector(client).sync_file("stream-replay/logs/test.txt", is_pull=False)
+    # conn = Connector()
+    # for client in conn.list_all():
+    #     Connector(client).sync_file("stream-replay/logs/test.txt", is_pull=False)
         
-    create_transmission_config("system_verify", conn)
+    # create_transmission_config("system_verify", conn)
+    cfg = load_config_file("system_verify")
+    policy_cfg = cfg.policy_config()
+    
+    for src, config in policy_cfg.items():
+        for dest, per_policy_config in config.items():
+            data_path = f"net_util/net_config/{src}_{dest}.json"
+            with open(data_path, "w") as f:
+                f.write(json.dumps(per_policy_config, indent=4))
+    
     

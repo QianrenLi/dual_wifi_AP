@@ -29,7 +29,8 @@ def main():
     exp_name = args.exp_name
 
     tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=True)
-
+    exit()
+    
     start_time = time.time()
     
     ## Start agent

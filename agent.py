@@ -9,117 +9,80 @@ Control + stochastic collector agent for the UDP IPC in util/ipc.py.
 """
 
 import argparse
-import csv
 import json
 import random
 import signal
 import socket
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, MISSING
+from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type
-import numpy as np
+from typing import Any, Dict, List, Optional, Type, get_args, get_origin, Union
 
 # --- Import your IPC wrapper (project root = one level up) ---
 sys.path.append(str(Path(__file__).resolve().parents[1]))
+from net_util.base import PolicyBase
 from util.ipc import ipc_control  # noqa: E402
 from util.control_cmd import ControlCmd, list_to_cmd, _json_default  # noqa: E402
+from util.trace_collec import flatten_leaves
+
+from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY
 
 # -------------------------
 # Utilities
 # -------------------------
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
-    
-def to_len_n_float_list(values: List[float], n: int) -> List[float]:
-    """Cast to float and pad/trim to exactly n."""
-    arr = [float(x) for x in values]
-    if len(arr) < n:
-        arr += [0.0] * (n - len(arr))
-    elif len(arr) > n:
-        arr = arr[:n]
-    return arr
 
-# -------------------------
-# Policy / NN placeholders
-# -------------------------
-class PolicyBase:
-    """
-    Base policy that understands the action structure via ControlCmd class.
-    Provides canonical mappings:
-      - cmd_to_vec(ControlCmd) -> List[float]
-      - vec_to_cmd(List[float], version) -> ControlCmd
-    """
+def _coerce_to_type(val: Any, typ) -> Any:
+    origin = get_origin(typ)
+    args = get_args(typ)
 
-    def __init__(self, cmd_cls: Type[ControlCmd], seed: Optional[int] = None):
-        self.cmd_cls = cmd_cls
-        self.action_dim: int = cmd_cls.__dim__()
-        if seed is not None:
-            random.seed(seed)
+    # Optional[T] -> Union[T, NoneType]
+    if origin is Union and type(None) in args:
+        inner = next(t for t in args if t is not type(None))
+        return None if val is None else _coerce_to_type(val, inner)
 
-    # --- policy API ---
-    def act(self, obs: Dict[str, Any]) -> List[float]:
-        """Deterministic base action (vector of length action_dim)."""
-        raise NotImplementedError
+    # Containers
+    if origin is list:
+        (inner,) = args or (Any,)
+        return [] if val is None else [ _coerce_to_type(x, inner) for x in val ]
+    if origin is dict:
+        (k_t, v_t) = args or (Any, Any)
+        return {} if val is None else { _coerce_to_type(k, k_t): _coerce_to_type(v, v_t) for k, v in val.items() }
 
+    # Concrete types
+    if typ is Path:
+        return Path(val) if not isinstance(val, Path) else val
+    if typ is bool:
+        # handle "true"/"false"/1/0 robustly
+        if isinstance(val, str):
+            return val.strip().lower() in ("1", "true", "yes", "y", "on")
+        return bool(val)
+    if typ is int:
+        return int(val)
+    if typ is float:
+        return float(val)
+    # str or Any or already correct
+    return val
 
-class ZeroPolicy(PolicyBase):
-    def act(self, obs: Dict[str, Any]) -> List[float]:
-        return [0.0] * self.action_dim
-
-
-class TorchMLPPolicy(PolicyBase):
-    """
-    Tiny MLP (if PyTorch available). Maps a numeric obs vector to action_dim.
-    """
-    def __init__(self, cmd_cls: Type[ControlCmd], seed: Optional[int] = None, hidden: int = 32):
-        super().__init__(cmd_cls, seed)
-        try:
-            import torch
-            import torch.nn as nn
-            self.torch = torch
-            self.nn = nn
-        except Exception as e:
-            raise RuntimeError("PyTorch not available; omit --use-nn or install torch.") from e
-
-        if seed is not None:
-            self.torch.manual_seed(seed)
-
-        self.model = None
-        self.hidden = hidden
-
-    def _build(self, in_dim: int):
-        self.model = self.nn.Sequential(
-            self.nn.Linear(in_dim, self.hidden),
-            self.nn.ReLU(),
-            self.nn.Linear(self.hidden, self.action_dim),
-            self.nn.Tanh(),
-        )
-
-    def _obs_to_vec(self, obs: Dict[str, Any]) -> List[float]:
-        vec: List[float] = []
-        def push(v):
-            if isinstance(v, (int, float)):
-                vec.append(float(v))
-        for _, v in sorted(obs.items()):
-            if isinstance(v, dict):
-                for __, vv in sorted(v.items()):
-                    push(vv)
-            else:
-                push(v)
-        return vec or [0.0]
-
-    def act(self, obs: Dict[str, Any]) -> List[float]:
-        import torch
-        x = self._obs_to_vec(obs)
-        if self.model is None:
-            self._build(len(x))
-        with torch.no_grad():
-            t = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
-            y = self.model(t)
-        return y.squeeze(0).tolist()
-
+def _inflate_dataclass_from_manifest(cls, manifest: Dict[str, Any]) -> Any:
+    """Create a dataclass instance from a dict using annotations + defaults."""
+    values: Dict[str, Any] = {}
+    for f in fields(cls):
+        # pick value: manifest -> dataclass default -> default_factory -> global defaults
+        if f.name in manifest:
+            raw = manifest[f.name]
+        elif f.default is not MISSING:
+            raw = f.default
+        elif f.default_factory is not MISSING:  # type: ignore[attr-defined]
+            raw = f.default_factory()           # type: ignore[misc]
+        else:
+            raise ValueError(f"Missing required field '{f.name}' for {cls.__name__}")
+        
+        values[f.name] = _coerce_to_type(raw, f.type)
+    return cls(**values)
 
 # -------------------------
 # Agent config / plumbing
@@ -150,7 +113,6 @@ def _install_signal_handlers():
         raise GracefulExit()
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
-
 
 # --------------------------------
 # IPC wrappers with robust retry
@@ -185,12 +147,10 @@ def ipc_get_statistics(ctrl: ipc_control,
             time.sleep(delay)
             delay *= 1.6
 
-
-
 # -------------------------
 # Main agent loop
 # -------------------------
-def run_agent(cfg: AgentConfig):
+def run_agent(cfg: AgentConfig, policy: PolicyBase):
     ensure_dir(cfg.out_dir)
     jsonl_path = cfg.out_dir / "rollout.jsonl"
 
@@ -198,15 +158,6 @@ def run_agent(cfg: AgentConfig):
     _install_signal_handlers()
 
     # Build policy with knowledge of ControlCmd structure
-    if cfg.use_nn:
-        try:
-            policy = TorchMLPPolicy(ControlCmd, seed=cfg.seed)
-        except RuntimeError as e:
-            print(f"[WARN] {e} Falling back to ZeroPolicy.", file=sys.stderr)
-            policy = ZeroPolicy(ControlCmd, seed=cfg.seed)
-    else:
-        policy = ZeroPolicy(ControlCmd, seed=cfg.seed)
-
     action_dim = policy.action_dim
     print(f"[INFO] Inferred action dimension from ControlCmd: {action_dim}")
 
@@ -214,7 +165,6 @@ def run_agent(cfg: AgentConfig):
 
     # Duration control
     first_ok_stats_t: Optional[float] = None
-
     with open(jsonl_path, "w", encoding="utf-8") as jf:
         print(f"[INFO] Agent started. Logging to {cfg.out_dir}")
         next_time = time.monotonic()
@@ -250,15 +200,14 @@ def run_agent(cfg: AgentConfig):
             obs_for_policy = {} if timed_out else stats
 
             # 2) Base action + stochastic exploration
-            base_vec = policy.act(obs_for_policy)
-            noisy_vec = [float(a) + rng.gauss(0.0, float(cfg.sigma)) for a in base_vec]
+            res, control_cmd = policy.act(obs_for_policy)
 
             # Build ControlCmd using canonical mapping (pads/trims internally)
             control_body: Dict[str, ControlCmd] = {}
+            ## TODO: handle multi-link control
             for link in cfg.links:
                 try:
-                    cmd = list_to_cmd(policy.cmd_cls, noisy_vec)
-                    control_body[link] = cmd
+                    control_body[link] = control_cmd
                 except (TypeError, ValueError) as e:
                     print(f"[ERROR] Failed to build ControlCmd for {link}: {e}", file=sys.stderr)
 
@@ -278,6 +227,8 @@ def run_agent(cfg: AgentConfig):
                 "action": control_body,  # final cmd per link
                 "stats": stats,
                 "timed_out": timed_out,
+                "res": res,
+                "policy": policy.__class__.__name__,
             }
             jf.write(json.dumps(record, ensure_ascii=False, default=_json_default) + "\n")
 
@@ -297,65 +248,44 @@ def run_agent(cfg: AgentConfig):
 
 
 
-# -------------------------
-# CLI
-# -------------------------
 def parse_args() -> AgentConfig:
     p = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
-    p.add_argument("--server-ip", type=str, default="127.0.0.1")
-    p.add_argument("--server-port", type=int, default=11112)
-    p.add_argument("--local-port", type=int, default=12345)
-    p.add_argument("--sigma", type=float, default=0.1,
-                   help="Stddev of exploration noise added to base action")
-    p.add_argument("--iterations", type=int, default=200)
-    p.add_argument("--period", type=float, default=0.5,
-                   help="Seconds between control steps")
-    p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--use-nn", action="store_true",
-                   help="Try a tiny Torch MLP (falls back to zeros if torch missing)")
-    p.add_argument("--stats-retries", type=int, default=3,
-                   help="Retries for statistics() on timeout")
-    p.add_argument("--fail-fast", action="store_true",
-                   help="If set, exit statistics() immediately on first timeout")
-    p.add_argument("--out-dir", type=str, default="logs/agent",
-                   help="Directory for JSONL/CSV logs")
-    p.add_argument("--duration", type=float, default=None,
-                   help="Max runtime in seconds, counted from FIRST successful stats collection. "
-                        "If set, it overrides --iterations.")
-    p.add_argument("--config", type=str, required= True)
+    p.add_argument("--control_config", type=str, required=True)
+    p.add_argument("--transmission_config", type=str, required=True)
+    
     args = p.parse_args()
     
-    if args.duration is not None:
-        args.iterations = int(args.duration / args.period) + 1
-    
-    with open(args.config, 'r') as f:
+    with open(args.transmission_config, 'r', encoding='utf-8') as f:
         config_data = json.load(f)
+        
     links = []
     for stream in config_data["streams"]:
         name = str(stream.get("port")) + "@" + str(stream.get("tos"))
         links.append(name)
+        
+    with open(args.control_config, 'r', encoding='utf-8') as f:
+        control_config = json.load(f)
+
+    agent_cfg = control_config['agent_cfg']
+    agent_cfg["links"] = links
+    agent_cfg["iterations"] = agent_cfg["duration"] // agent_cfg["period"]
     
-    return AgentConfig(
-        server_ip=args.server_ip,
-        server_port=args.server_port,
-        local_port=args.local_port,
-        links=links,
-        sigma=args.sigma,
-        iterations=args.iterations,
-        period=args.period,
-        seed=args.seed,
-        use_nn=args.use_nn,
-        stats_retries=args.stats_retries,
-        fail_fast=args.fail_fast,
-        out_dir=Path(args.out_dir),
-        duration = args.duration,
-    )
-
-
+    cfg = _inflate_dataclass_from_manifest(AgentConfig, agent_cfg)
+    
+    policy_cfg = control_config['policy_cfg']
+    policy_name = policy_cfg["policy_name"]
+    policy_cfg_cls = POLICY_CFG_REGISTRY[policy_name]
+    policy_cls = POLICY_REGISTRY[policy_name]
+    
+    policy_cfg = _inflate_dataclass_from_manifest(policy_cfg_cls, policy_cfg)
+    policy: PolicyBase = policy_cls( ControlCmd, policy_cfg)
+    
+    return cfg, policy
+    
 def main():
     try:
-        cfg = parse_args()
-        run_agent(cfg)
+        cfg, policy = parse_args()
+        run_agent(cfg, policy)
     except GracefulExit:
         print("\n[INFO] Caught interrupt, exiting.")
     except KeyboardInterrupt:
