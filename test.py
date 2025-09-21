@@ -30,6 +30,9 @@ def main():
 
     tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=True)
     
+    traces = []
+    maximum_trace_len = 10
+    
     iteration = 0
     while True:
         start_time = time.time()
@@ -100,10 +103,14 @@ def main():
         exp_sync_time = time.time()
         
         ## TODO: integrated training
+        traces.append(f'{folder}/rollout.jsonl')
+        if len(traces) > maximum_trace_len:
+            traces.pop(0)
+        
         if iteration > 0:
-            conn.batch('TrainAgent', "model_train", {"control_config": srcs['control_config'], "trace_path": f'{folder}/rollout.jsonl', 'load_path': f'net_util/net_cp/{exp_name}/{iteration}.pt'})
+            conn.batch('TrainAgent', "model_train", {"control_config": srcs['control_config'], "trace_path": " ".join(traces), 'load_path': f'net_util/net_cp/{exp_name}/{iteration}.pt'})
         else:
-            conn.batch('TrainAgent', "model_train", {"control_config": srcs['control_config'], "trace_path": f'{folder}/rollout.jsonl'})
+            conn.batch('TrainAgent', "model_train", {"control_config": srcs['control_config'], "trace_path": " ".join(traces)})
         
         conn.executor.fetch()
         while True:

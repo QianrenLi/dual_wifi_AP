@@ -137,8 +137,8 @@ class PPO(PolicyBase):
             f.write(msg + "\n")
             f.flush()
 
-            # if early_stop:
-            #     break
+            if early_stop:
+                break
 
     def train_per_epoch(self, log_path: str = "net_util/logs/train.log"):
         with open(log_path, "w") as f:
