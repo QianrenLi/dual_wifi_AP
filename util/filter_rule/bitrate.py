@@ -21,7 +21,7 @@ def bitrate_delta(value: Any, alpha: float = 1.0, beta: float = 0.0):
     # scalar
     if _is_num(value):
         prev = prev_store.get("__scalar__")
-        delta = 0.0 if prev is None else float(value) - float(prev)
+        delta = 0.0 if prev is None else abs(float(value) - float(prev))
         prev_store["__scalar__"] = float(value)
         return alpha * float(value) + beta * delta
 

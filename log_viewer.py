@@ -33,6 +33,7 @@ def parse_cli_args():
     parser.add_argument("--root", type=str, required=True, help="Root folder containing trial_* subfolders")
     parser.add_argument("--control-config", type=str, required=True, help="Path to control_config JSON (reads reward_cfg)")
     parser.add_argument("--refresh", type=float, default=1.0, help="Refresh interval (seconds)")
+    # Note: legacy flag kept for compatibility; plotting now uses sidebar 'Reward view'
     parser.add_argument("--reward-agg", type=str, default="sum", choices=["sum", "mean"], help="Aggregate flattened reward leaves")
     return parser.parse_known_args()
 
@@ -166,22 +167,29 @@ class MultiTrialWatcher:
 
 # ---------------- reward from trace_filter + flatten_leaves ----------------
 def build_reward_from_record(record: Dict[str, Any], reward_descriptor: Optional[Dict[str, Any]], agg: str) -> float:
+    """Return per-slot reward as sum of flattened leaves (default behavior)."""
     if reward_descriptor is None:
         return 0.0
     filtered = trace_filter(record, reward_descriptor)
     leaves = flatten_leaves(filtered)
-    if not leaves:
-        return 0.0
-    if agg == "mean":
-        return float(sum(leaves) / len(leaves))
-    return float(sum(leaves))  # default sum
+    return float(sum(leaves))
+
+# ---------------- helpers for plotting reward modes ----------------
+def discounted_running_sum(xs: List[float], gamma: float) -> List[float]:
+    acc = 0.0
+    out: List[float] = []
+    for r in xs:
+        acc = acc * gamma + r
+        out.append(acc)
+    return out
 
 # ---------------- data model in session ----------------
 def init_session_data():
     st.session_state.setdefault("global_step", 0)
     st.session_state.setdefault("global_epoch", 0)
     st.session_state.setdefault("t_rollout", [])
-    st.session_state.setdefault("reward_values", [])
+    st.session_state.setdefault("reward_values", [])  # kept for compatibility
+    st.session_state.setdefault("reward_raw", [])     # element-wise per-slot reward
     st.session_state.setdefault("t_train", [])
     st.session_state.setdefault("rollout_series", {})  # key -> list
     st.session_state.setdefault("train_series", {})    # key -> list
@@ -194,8 +202,9 @@ def init_session_data():
 def append_rollout(rec: Dict[str, Any], reward_cfg: Optional[Dict[str, Any]], agg: str):
     st.session_state["global_step"] += 1
     st.session_state["t_rollout"].append(st.session_state["global_step"])
-    r = build_reward_from_record(rec, reward_cfg, agg)
-    st.session_state["reward_values"].append(float(r))
+    r = build_reward_from_record(rec, reward_cfg, agg)  # element-wise reward at this step
+    st.session_state["reward_raw"].append(float(r))
+    st.session_state["reward_values"].append(float(r))  # kept for back-compat
 
     # flatten numeric leaves
     flat: Dict[str, float] = {}
@@ -215,14 +224,19 @@ def append_train(metrics: Dict[str, float]):
         st.session_state["train_series"].setdefault(k, []).append(v)
 
 # ---------------- plotting ----------------
-def plot_rollout(selected_keys: List[str], uirev: str):
+def plot_rollout(selected_keys: List[str], uirev: str, reward_mode: str, gamma: float):
     t = st.session_state["t_rollout"]
     if not t:
         return go.Figure()
     fig = go.Figure()
     # reward first
     if "reward" in selected_keys:
-        fig.add_trace(go.Scatter(x=t, y=st.session_state["reward_values"], mode="lines", name="reward"))
+        raw = st.session_state["reward_raw"]
+        ys = raw if reward_mode == "element" else discounted_running_sum(raw, gamma)
+        xs = t[:len(ys)]
+        if xs and ys:
+            name = "reward (element)" if reward_mode == "element" else f"reward (acc, γ={gamma:.3f})"
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name=name))
     # other selected keys
     for k in selected_keys:
         if k == "reward":
@@ -236,7 +250,7 @@ def plot_rollout(selected_keys: List[str], uirev: str):
         yaxis_title="value",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=40, r=20, t=40, b=40),
-        uirevision=uirev,  # <- preserves zoom/pan across updates
+        uirevision=uirev,  # preserves zoom/pan across updates
     )
     return fig
 
@@ -291,7 +305,13 @@ def main():
     with st.sidebar:
         st.header("Controls")
         refresh = st.number_input("Refresh interval (sec)", min_value=0.2, value=float(args.refresh), step=0.2, format="%.1f")
-        reward_agg = st.selectbox("Reward aggregation", options=["sum", "mean"], index=0 if args.reward_agg=="sum" else 1)
+
+        # Reward view (plotting only): element-wise vs accumulated discounted
+        reward_mode = st.selectbox("Reward view", options=["element", "acc"], index=0)
+        gamma = 0.99
+        if reward_mode == "acc":
+            gamma = st.number_input("Discount γ", min_value=0.0, max_value=1.0, value=0.99, step=0.01, format="%.4f")
+
         st.divider()
         # filtering + selection
         r_filter = st.text_input("Filter rollout keys (substring)", value="")
@@ -305,7 +325,8 @@ def main():
 
     # ingest new lines
     for rec in watcher.read_new_rollout():
-        append_rollout(rec, reward_cfg, reward_agg)
+        # pass args.reward_agg only to keep signature; plotting ignores it now
+        append_rollout(rec, reward_cfg, args.reward_agg)
     for _trial, _epoch, metrics in watcher.read_new_train():
         append_train(metrics)
 
@@ -335,7 +356,8 @@ def main():
             default=[k for k in default_rollout if k in rollout_keys_view],
             key="sel_rollout_multiselect",
         )
-        fig_rollout = plot_rollout(sel_rollout, uirev=st.session_state["rollout_uirev"])
+        fig_rollout = plot_rollout(sel_rollout, uirev=st.session_state["rollout_uirev"],
+                                   reward_mode=reward_mode, gamma=gamma)
         st.plotly_chart(fig_rollout, use_container_width=True)
     with col_right:
         st.subheader("Training")
@@ -352,9 +374,6 @@ def main():
 
     # auto refresh
     if auto_refresh:
-        # note: this keeps the app responsive and preserves plot zoom via uirevision
-        st.experimental_rerun() if refresh <= 0.25 else st.experimental_singleton.clear()  # placeholder to satisfy linter
-        st.experimental_set_query_params()  # no-op but keeps state
         time.sleep(refresh)
         st.rerun()
 
