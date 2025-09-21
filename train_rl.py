@@ -86,109 +86,163 @@ def _sum_logp(x):
     return float(np.asarray(x, dtype=np.float32).sum())
 
 
-def build_rollout_buffer_from_trace_flat(
-    states, actions, rewards, network_output,
-    device="cuda", advantage_estimator="gae",
-    gamma: float = 0.99, lam: float = 0.95,
+def _normalize_trace_paths(raw_paths):
+    # raw_paths is a list (because nargs='+'); each item may itself be "a,b,c"
+    paths = []
+    for item in raw_paths:
+        paths.extend([s for s in (p.strip() for p in item.split(",")) if s])
+    # (Optional) de-dup while preserving order
+    seen = set()
+    uniq = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
+
+def build_rollout_buffer_from_traces_flat(
+    traces,                                # list of (states, actions, rewards, network_output)
+    device="cuda",
+    advantage_estimator="gae",
+    gamma: float = 0.99,
+    lam: float = 0.95,
     reward_agg="sum",  # "sum" | "mean" | callable(np.ndarray)->float
 ):
     """
-    states[t], actions[t], rewards[t] are already 1-D float lists (or array-likes).
-    network_output[t] is a dict, may contain:
-      - 'log_prob' (scalar or per-dim vector)
-      - 'value' (scalar)
-      - optional 'done'
-      - optional 'next_value'/'bootstrap_value' for bootstrapping
+    Concatenate multiple flat traces into ONE RolloutBuffer.
+    Each element of `traces` is (states, actions, rewards, network_output),
+    where states[t], actions[t], rewards[t] are already 1-D float lists (or array-likes),
+    and network_output[t] may contain 'log_prob', 'value', optional 'done' and 'next_value'.
+    We force an episode boundary at the end of each trace if 'done' is missing there.
     """
-    T = len(states)
-    assert len(actions) == T and len(rewards) == T and len(network_output) == T, "Trace lengths must match."
-
-    obs_dim = _as_1d_float(states[0]).size
-    act_dim = _as_1d_float(actions[0]).size
-
-    buf = RolloutBuffer.create(buffer_size=T, obs_dim=obs_dim, act_dim=act_dim, n_envs=1, device=device)
-    buf.advantage_estimator = advantage_estimator
-
+    import numpy as np
     # Reward aggregator
     if reward_agg == "sum":
-        agg = lambda arr: float(arr.sum())
+        agg = lambda arr: float(np.asarray(arr, dtype=np.float32).sum())
     elif reward_agg == "mean":
-        agg = lambda arr: float(arr.mean())
+        agg = lambda arr: float(np.asarray(arr, dtype=np.float32).mean())
     elif callable(reward_agg):
-        agg = lambda arr: float(reward_agg(arr))
+        agg = lambda arr: float(reward_agg(np.asarray(arr, dtype=np.float32)))
     else:
         raise ValueError("reward_agg must be 'sum', 'mean', or callable")
 
-    for t in range(T):
-        obs_t = th.tensor(_as_1d_float(states[t]),  dtype=th.float32, device=device).unsqueeze(0)   # [1, obs_dim]
-        # act_t = th.tensor(_as_1d_float(actions[t]), dtype=th.float32, device=device).unsqueeze(0)   # [1, act_dim]
+    # Basic dims from first timestep of first trace
+    assert len(traces) >= 1, "No traces provided."
+    first_states, first_actions, _, _ = traces[0]
+    obs_dim = _as_1d_float(first_states[0]).size
+    act_dim = _as_1d_float(first_actions[0]).size
 
-        # rewards already 1-D list → aggregate to scalar
-        r_arr = _as_1d_float(rewards[t])
-        rew_t = th.tensor([agg(r_arr)], dtype=th.float32, device=device)                            # [1]
+    # Total steps
+    total_T = sum(len(s) for (s, a, r, n) in traces)
 
-        net_t = network_output[t]
-        
-        act_vec = _extract(net_t, ["action"], default=None)
-        act_t = th.tensor(act_vec, dtype=th.float32, device=device).unsqueeze(0)
-        
-        logp_vec = _extract(net_t, ["log_prob", "logp", "logprob", "log_probs"], default=None)
-        logp_t  = th.tensor([_sum_logp(logp_vec)], dtype=th.float32, device=device)                 # [1]
+    buf = RolloutBuffer.create(buffer_size=total_T, obs_dim=obs_dim, act_dim=act_dim, n_envs=1, device=device)
+    buf.advantage_estimator = advantage_estimator
 
-        val_t   = _extract(net_t, ["value", "v"], default=0.0)
-        val_t   = th.tensor([float(val_t)], dtype=th.float32, device=device)                        # [1]
+    # Fill buffer
+    step_idx = 0
+    last_value_for_bootstrap = 0.0  # fallback if nothing present
+    for (states, actions, rewards, network_output) in traces:
+        T = len(states)
+        assert len(actions) == T and len(rewards) == T and len(network_output) == T, "Trace lengths must match."
 
-        done_t  = _extract(net_t, ["done", "terminal", "is_done"], default=False)
-        done_t  = th.tensor([1.0 if bool(done_t) else 0.0], dtype=th.float32, device=device)        # [1]
+        for t in range(T):
+            obs_t = th.tensor(_as_1d_float(states[t]),  dtype=th.float32, device=device).unsqueeze(0)
+            # Prefer action from network_output (if you recorded it there), else use `actions`
+            act_vec = _extract(network_output[t], ["action"], default=None)
+            if act_vec is None:
+                act_vec = _as_1d_float(actions[t])
+            act_t = th.tensor(act_vec, dtype=th.float32, device=device).unsqueeze(0)
 
-        buf.add(obs=obs_t, action=act_t, log_prob=logp_t, reward=rew_t, done=done_t, value=val_t)
+            r_arr = _as_1d_float(rewards[t])
+            rew_t = th.tensor([agg(r_arr)], dtype=th.float32, device=device)
 
-    # Bootstrap with next/bootstrapped value if present, else last value, else 0
-    last_val = _extract(network_output[-1], ["next_value", "bootstrap_value", "value", "v"], default=0.0)
-    last_val = th.tensor([float(last_val)], dtype=th.float32, device=device)
+            logp_vec = _extract(network_output[t], ["log_prob", "logp", "logprob", "log_probs"], default=None)
+            logp_t  = th.tensor([_sum_logp(logp_vec)], dtype=th.float32, device=device)
 
-    buf.compute_advantages(last_value=last_val, normalize=True, gamma=gamma, lam=lam)
+            val_t   = _extract(network_output[t], ["value", "v"], default=0.0)
+            val_t   = th.tensor([float(val_t)], dtype=th.float32, device=device)
+
+            # Done handling: respect recorded 'done'; if missing, force done=True at the final step of this trace
+            recorded_done = _extract(network_output[t], ["done", "terminal", "is_done"], default=None)
+            if recorded_done is None:
+                done_flag = (t == T - 1)
+            else:
+                done_flag = bool(recorded_done)
+                # if the trace doesn't mark last step as done, still keep what recorder says (you may override here if desired)
+                if t == T - 1 and recorded_done is None:
+                    done_flag = True
+            done_t  = th.tensor([1.0 if done_flag else 0.0], dtype=th.float32, device=device)
+
+            buf.add(obs=obs_t, action=act_t, log_prob=logp_t, reward=rew_t, done=done_t, value=val_t)
+            step_idx += 1
+
+        # Track bootstrap candidate value for this trace (priority: explicit next/bootstrap → last value)
+        last_val = _extract(network_output[-1], ["next_value", "bootstrap_value", "value", "v"], default=0.0)
+        last_value_for_bootstrap = float(last_val)
+
+    # Use the last seen bootstrap candidate
+    last_val_t = th.tensor([last_value_for_bootstrap], dtype=th.float32, device=device)
+    buf.compute_advantages(last_value=last_val_t, normalize=True, gamma=gamma, lam=lam)
     return buf
 
 
 def main():
     p = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
     p.add_argument("--control_config", type=str, required=True)
-    p.add_argument("--trace_path", type=str, required=True)
-    p.add_argument("--load_path", type=str, default= None)
-    
+    p.add_argument("--trace_path", type=str, required=True, nargs="+")
+    p.add_argument("--load_path", type=str, default=None)
     args = p.parse_args()
+
+    trace_paths = _normalize_trace_paths(args.trace_path)
 
     with open(args.control_config, 'r', encoding='utf-8') as f:
         control_config = json.load(f)
-    
+
     policy_cfg = control_config['policy_cfg']
     policy_name = policy_cfg["policy_name"]
     policy_cfg_cls = POLICY_CFG_REGISTRY[policy_name]
     policy_cls = POLICY_REGISTRY[policy_name]
-    
+
     rollout_cfg = control_config['rollout_cfg']
-    states, actions, rewards, network_output = trace_collec(args.trace_path, state_descriptor=control_config.get('state_cfg', None), reward_descriptor=control_config.get('reward_cfg', None))
-    
-    states = [ flatten_leaves(state) for state in states ]
-    actions = [ flatten_leaves(action) for action in actions ]
-    rewards = [ flatten_leaves(reward) for reward in rewards ]
-    
-    rollout_buffer = build_rollout_buffer_from_trace_flat( states, actions, rewards, network_output, advantage_estimator=rollout_cfg["advantage_estimator"], gamma=rollout_cfg["gamma"], lam=rollout_cfg["lam"])
-    
+
+    # ---- load & flatten multiple traces
+    merged_traces = []
+    for tp in trace_paths:
+        s, a, r, net = trace_collec(
+            tp,
+            state_descriptor=control_config.get('state_cfg', None),
+            reward_descriptor=control_config.get('reward_cfg', None)
+        )
+
+        s = [flatten_leaves(x) for x in s]
+        a = [flatten_leaves(x) for x in a]
+        r = [flatten_leaves(x) for x in r]
+        merged_traces.append((s, a, r, net))
+
+    rollout_buffer = build_rollout_buffer_from_traces_flat(
+        merged_traces,
+        device="cuda",
+        advantage_estimator=rollout_cfg["advantage_estimator"],
+        gamma=rollout_cfg["gamma"],
+        lam=rollout_cfg["lam"],
+        reward_agg=rollout_cfg.get("reward_agg", "sum"),
+    )
+
     policy_cfg = _inflate_dataclass_from_manifest(policy_cfg_cls, policy_cfg)
-    policy: PolicyBase = policy_cls( ControlCmd, policy_cfg, rollout_buffer=rollout_buffer, device = "cuda")
-    
-    if args.load_path is None or args.load_path == "none":
+    policy: PolicyBase = policy_cls(ControlCmd, policy_cfg, rollout_buffer=rollout_buffer, device="cuda")
+
+    if args.load_path is None or args.load_path.lower() == "none":
         store_path = Path("net_util/net_cp") / Path(args.control_config).parent.stem / "1.pt"
     else:
-        policy.load(args.load_path, device = 'cuda')
+        policy.load(args.load_path, device='cuda')
         next_id = int(Path(args.load_path).stem) + 1
         store_path = Path(args.load_path).parent / f"{next_id}.pt"
-        
+
     os.makedirs(store_path.parent, exist_ok=True)
     print(store_path)
-    
+
     policy.train_per_epoch()
     policy.save(store_path)
     
