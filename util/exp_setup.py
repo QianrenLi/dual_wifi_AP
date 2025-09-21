@@ -34,25 +34,32 @@ def create_transmission_config(config_name, conn: Connector, is_update=False):
     flows = reshape_to_flows_by_port(configs)
     
     tx_srcs = {}
-    folder = f"stream-replay/data/configs/{config_name}"
-    os.makedirs(folder, exist_ok=True)
+    
+    tx_folder = f"stream-replay/data/configs/{config_name}"
+    os.makedirs(tx_folder, exist_ok=True)
+    network_folder = f"net_util/net_config/{config_name}"
+    os.makedirs(network_folder, exist_ok=True)
     
     for src, config in configs.items():
-        tx_srcs[src] = []
+        tx_srcs[src] = {}
+        ## assert only one dest in config
+        assert len(config) == 1, "Only support one dest in config"
         for dest, stream_config in config.items():
-            data_path = f"{folder}/{src}_{dest}.json"
+            data_path = f"{tx_folder}/{src}_{dest}.json"
             with open(data_path, "w") as f:
                 f.write(json.dumps(stream_config, indent=4))
-            tx_srcs[src].append(data_path)
+            tx_srcs[src]['transmission_config'] = data_path
             
-            data_path = f"net_util/net_config/{src}_{dest}.json"
+            data_path = f"{network_folder}/{src}_{dest}.json"
             with open(data_path, "w") as f:
                 f.write(json.dumps(policy_configs[src][dest], indent=4))
-    
+            tx_srcs[src]['control_config'] = data_path
+
     if is_update:         
         ## Sync the config_name folder to all clients
         for client in clients:
-            Connector(client).sync_file(folder, is_pull=False)
+            Connector(client).sync_file(tx_folder, is_pull=False)
+            Connector(client).sync_file(network_folder, is_pull=False)
             
     return tx_srcs, flows
 

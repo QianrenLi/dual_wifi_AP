@@ -28,8 +28,7 @@ def main():
     duration = args.duration
     exp_name = args.exp_name
 
-    tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=True)
-    exit()
+    tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=False)
     
     start_time = time.time()
     
@@ -41,27 +40,27 @@ def main():
         src_flows[flow.src_sta].append(flow.flow_name)
     
     for tx, srcs in tx_srcs.items():
-        for src in srcs:
-            print(src, tx)
-            conn.batch(tx, "start_agent", {"duration": duration, "config_file": src}, timeout = duration + 10).wait(0.1)
+        conn.batch(tx, "start_agent", {"control_config": srcs['control_config'], "transmission_config": srcs['transmission_config']})
     
-    # # Rx
-    for port, flow in flows.items():
+    ## Rx
+    wait_time = 0.1
+    for idx, (port, flow) in enumerate(flows.items()):
+        if idx == len(flows) - 1:
+            wait_time = 3
         if 'file' in flow.npy_file:
-            conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port})
+            conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port}).wait(wait_time)
         else:
             if args.render:
                 ## Wait due to the late start of xterm
-                conn.batch(flow.dst_sta, "receive_file_gui", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]} --rx-mode'}, timeout = duration + 5).wait(1)
+                conn.batch(flow.dst_sta, "receive_file_gui", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]} --rx-mode'}).wait(wait_time)
             else:
-                conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]}'}, timeout = duration + 5).wait(0.1)
+                conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]}'}).wait(wait_time)
 
     # # Tx
     for tx, srcs in tx_srcs.items():
         print(f"Transmission: {tx}")
-        for src in srcs:
-            config_path = "/".join(src.split("/")[1:])
-            conn.batch(tx, "send_file", {"duration": duration, "config": config_path}, timeout = duration + 5)
+        config_path = "/".join(srcs['transmission_config'].split("/")[1:])
+        conn.batch(tx, "send_file", {"duration": duration, "config": config_path})
 
     # Get Result
     conn.executor.fetch()
@@ -78,7 +77,7 @@ def main():
     # Pull RTT logs
     log_dir = "stream-replay/logs"
 
-    folder = f'exp_trace/{exp_name}/trial_{datetime.now().strftime("%Y%m%d-%H%M")}'
+    folder = f'exp_trace/{exp_name}/trial_{datetime.now().strftime("%Y%m%d-%H%M%S")}'
     for flow in flows.values():
         client = flow.src_sta
         file_name = flow_to_rtt_log(flow)

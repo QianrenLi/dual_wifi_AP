@@ -61,26 +61,26 @@ class ipc_control(ipc_socket):
     
 if __name__ == '__main__':
     test_ipc = ipc_control( '127.0.0.1',  11112 )
-    # res = test_ipc.statistics()
-    # print(res)
-    from util.control_cmd import list_to_cmd, cmd_to_list
+    res = test_ipc.statistics()
+    print(res)
+    # from util.control_cmd import list_to_cmd, cmd_to_list
+    # # test_ipc.control(
+    # #     {'6203@128': 
+    # #         ControlCmd(
+    # #             policy_parameters=[0.1, 0.2, 0.3, 0.5],
+    # #             version=1
+    # #         )
+    # #     }
+    # # )
+    
+    # test = list_to_cmd(ControlCmd, [0.1, 0.2, 0.3, 0.5, 1])
+    # print(test)
+    # print(cmd_to_list(test))
     # test_ipc.control(
     #     {'6203@128': 
-    #         ControlCmd(
-    #             policy_parameters=[0.1, 0.2, 0.3, 0.5],
-    #             version=1
-    #         )
+    #         list_to_cmd(ControlCmd, [0.1, 0.2, 0.3, 0.5, 2])
     #     }
     # )
-    
-    test = list_to_cmd(ControlCmd, [0.1, 0.2, 0.3, 0.5, 1])
-    print(test)
-    print(cmd_to_list(test))
-    test_ipc.control(
-        {'6203@128': 
-            list_to_cmd(ControlCmd, [0.1, 0.2, 0.3, 0.5, 2])
-        }
-    )
     
     # res = test_ipc.statistics()
     

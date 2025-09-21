@@ -18,14 +18,14 @@ import time
 from dataclasses import dataclass, MISSING
 from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type, get_args, get_origin, Union
+from typing import Any, Dict, List, Optional, Tuple, get_args, get_origin, Union
 
 # --- Import your IPC wrapper (project root = one level up) ---
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from net_util.base import PolicyBase
 from util.ipc import ipc_control  # noqa: E402
-from util.control_cmd import ControlCmd, list_to_cmd, _json_default  # noqa: E402
-from util.trace_collec import flatten_leaves
+from util.control_cmd import ControlCmd, _json_default  # noqa: E402
+from util.trace_collec import trace_filter
 
 from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY
 
@@ -150,11 +150,10 @@ def ipc_get_statistics(ctrl: ipc_control,
 # -------------------------
 # Main agent loop
 # -------------------------
-def run_agent(cfg: AgentConfig, policy: PolicyBase):
+def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict):
     ensure_dir(cfg.out_dir)
     jsonl_path = cfg.out_dir / "rollout.jsonl"
 
-    rng = random.Random(cfg.seed)
     _install_signal_handlers()
 
     # Build policy with knowledge of ControlCmd structure
@@ -197,8 +196,8 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase):
             if timed_out:
                 continue
             
-            obs_for_policy = {} if timed_out else stats
-
+            obs_for_policy = {} if timed_out else trace_filter(stats, state_cfg)
+            
             # 2) Base action + stochastic exploration
             res, control_cmd = policy.act(obs_for_policy)
 
@@ -248,7 +247,7 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase):
 
 
 
-def parse_args() -> AgentConfig:
+def parse_args() -> Tuple[AgentConfig, PolicyBase]:
     p = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
     p.add_argument("--control_config", type=str, required=True)
     p.add_argument("--transmission_config", type=str, required=True)
@@ -280,12 +279,14 @@ def parse_args() -> AgentConfig:
     policy_cfg = _inflate_dataclass_from_manifest(policy_cfg_cls, policy_cfg)
     policy: PolicyBase = policy_cls( ControlCmd, policy_cfg)
     
-    return cfg, policy
+    state_cfg = control_config.get('state_cfg', None)
+    
+    return cfg, policy, state_cfg
     
 def main():
     try:
-        cfg, policy = parse_args()
-        run_agent(cfg, policy)
+        cfg, policy, state_cfg = parse_args()
+        run_agent(cfg, policy, state_cfg)
     except GracefulExit:
         print("\n[INFO] Caught interrupt, exiting.")
     except KeyboardInterrupt:

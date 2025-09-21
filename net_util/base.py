@@ -26,7 +26,8 @@ class PolicyBase:
     def act(self, obs: Dict[str, Any]) -> List[float]:
         """Deterministic base action (vector of length action_dim)."""
         res = self.tf_act(self._pre_act(obs))
-        return res, list_to_cmd(res['action'], self.cmd_cls)
+        safe_res = {str(k): (v.tolist() if hasattr(v, "tolist") else v) for k, v in res.items()}
+        return safe_res, list_to_cmd(self.cmd_cls, safe_res['action'])
         
     
     def _pre_act(self, obs: Dict[str, Any]) -> List[float]:

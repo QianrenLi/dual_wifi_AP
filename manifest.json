@@ -5,6 +5,7 @@
         "tap": "tap.py",
         "agent": "agent.py",
         "util": "util",
+        "net_util": "net_util",
         "tools": "tools",
         "data": "stream-replay/data",
         "core": "stream-replay/core",
@@ -78,13 +79,11 @@
         "start_agent":{
             "description": "Run the agent to apply control and optimization.",
             "parameters":{
-                "duration": 10,
-                "server_ip": "127.0.0.1",
-                "ipc_port": 11112,
-                "config_file": ""
+                "control_config": "data/control_config.json",
+                "transmission_config": "data/test.json"
             },
             "commands": [
-                "python agent.py --use-nn --server-ip $server_ip --server-port $ipc_port --local-port 12345 --config $config_file --sigma 0.15 --period 0.005 --duration $duration"
+                "python agent.py --control_config $control_config --transmission_config $transmission_config"
             ]
         },
         "warm_up":{
