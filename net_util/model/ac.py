@@ -5,8 +5,8 @@ class Network(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, hidden: int = 64, init_log_std: float = 0.0):
         super().__init__()
         self.backbone = nn.Sequential(
-            nn.Linear(obs_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU()
+            nn.Linear(obs_dim, hidden), nn.Tanh(),
+            nn.Linear(hidden, hidden), nn.Tanh()
         )
         self.action_mean = nn.Linear(hidden, act_dim)
         self.value_head = nn.Linear(hidden, 1)
