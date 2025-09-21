@@ -15,8 +15,7 @@ import signal
 import socket
 import sys
 import time
-from dataclasses import dataclass, MISSING
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, MISSING, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, get_args, get_origin, Union
 
@@ -26,7 +25,6 @@ from net_util.base import PolicyBase
 from util.ipc import ipc_control  # noqa: E402
 from util.control_cmd import ControlCmd, _json_default  # noqa: E402
 from util.trace_collec import trace_filter
-
 from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY
 
 # -------------------------
@@ -245,8 +243,6 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict):
         pass
     print("[INFO] Agent stopped gracefully.")
 
-
-
 def parse_args() -> Tuple[AgentConfig, PolicyBase]:
     p = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
     p.add_argument("--control_config", type=str, required=True)
@@ -279,6 +275,16 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
     policy_cfg = _inflate_dataclass_from_manifest(policy_cfg_cls, policy_cfg)
     policy: PolicyBase = policy_cls( ControlCmd, policy_cfg)
     
+    policy_load_path = policy_cfg["load_path"]
+    policy_cp_path = Path("net_util/net_cp") / Path(args.control_config).parent.stem
+    if policy_load_path == 'latest':
+        ids = [int(p.stem) for p in policy_cp_path.glob("*.pt") if p.stem.isdigit()]
+        if not ids:
+            policy_load_path = None
+        else:
+            policy_load_path = policy_cp_path / f"{max(ids)}.pt"
+    if policy_load_path:
+        policy.load(policy_load_path, device=policy_cfg['device'])
     state_cfg = control_config.get('state_cfg', None)
     
     return cfg, policy, state_cfg

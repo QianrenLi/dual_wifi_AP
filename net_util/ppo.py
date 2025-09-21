@@ -35,11 +35,11 @@ class PPO_Config:
     
 @register_policy
 class PPO(PolicyBase):
-    def __init__(self, cmd_cls, cfg: PPO_Config, rollout_buffer: RolloutBuffer = None):
+    def __init__(self, cmd_cls, cfg: PPO_Config, rollout_buffer: RolloutBuffer = None, device = None):
         super().__init__(cmd_cls)
         th.manual_seed(cfg.seed); np.random.seed(cfg.seed)
         self.cfg = cfg
-        self.device = th.device(cfg.device)
+        self.device = th.device(cfg.device) if device is None else th.device(device)
         
         ## load network module
         net_mod = importlib.import_module(cfg.network_module_path)
@@ -49,21 +49,6 @@ class PPO(PolicyBase):
         self.opt = th.optim.Adam(self.net.parameters(), lr=cfg.lr)
         
         self.buf = rollout_buffer
-
-    # @th.no_grad()
-    # def _collect_rollout(self, buf: RolloutBuffer):
-    #     obs = self.env.reset().to(self.device).float()
-    #     for t in range(buf.size):
-    #         action, logp, value = self.net.act(obs)
-    #         next_obs, reward, done, _ = self.env.step(action)
-    #         buf.add(obs, action, logp, reward.to(self.device), done.to(self.device), value)
-    #         obs = next_obs.to(self.device).float()
-
-    #     # bootstrap value for GAE (using final obs)
-    #     mean, std, last_v = self.net(obs)
-    #     # add a terminal at last index for simpler GAE (done[T] = 1)
-    #     buf.dones[-1] = th.ones_like(buf.dones[-1])
-    #     buf.compute_gae(last_v.detach(), gamma=self.cfg.gamma, lam=self.cfg.gae_lambda)
 
     def _ppo_update(self):
         clip = self.cfg.clip_range
@@ -110,14 +95,22 @@ class PPO(PolicyBase):
                 if np.mean(approx_kls) > 1.5 * self.cfg.target_kl:
                     break
 
-    def train_per_epoch(self):
-        for upd in range(self.cfg.n_updates):
-            self._ppo_update()
-            # Simple logging
-            with th.no_grad():
-                ev = 1.0 - th.var((self.buf.returns - self.buf.values).view(-1)) / (th.var(self.buf.returns.view(-1)) + 1e-8)
-                avg_ret = self.buf.returns.view(-1).mean().item()
-            print(f"[{upd+1:04d}/{self.cfg.n_updates:04d}] avg_return={avg_ret:8.3f}  exp_var={ev.item():6.3f}  log_std={self.net.log_std.data.mean():6.3f}")
+    def train_per_epoch(self, log_path: str = "net_util/logs/train.log"):
+        with open(log_path, "a") as f:
+            for upd in range(self.cfg.n_updates):
+                self._ppo_update()
+                # Simple logging
+                with th.no_grad():
+                    ev = 1.0 - th.var((self.buf.returns - self.buf.values).view(-1)) / (
+                        th.var(self.buf.returns.view(-1)) + 1e-8
+                    )
+                    avg_ret = self.buf.returns.view(-1).mean().item()
+                    msg = (f"[{upd+1:04d}/{self.cfg.n_updates:04d}] "
+                        f"avg_return={avg_ret:8.3f}  "
+                        f"exp_var={ev.item():6.3f}  "
+                        f"log_std={self.net.log_std.data.mean():6.3f}\n")
+                f.write(msg)
+                f.flush()   # ensures it's written to disk
 
     @th.no_grad()
     def tf_act(self, obs_vec):
@@ -128,21 +121,4 @@ class PPO(PolicyBase):
             "log_prob": log_prob.cpu().numpy(),
             "value": value.cpu().numpy()
         }
-        
-        
-    # @th.no_grad()
-    # def evaluate(self, episodes: int = 10):
-    #     total = 0.0; count = 0
-    #     obs = self.env.reset().to(self.device).float()
-    #     ep_len = self.env.horizon
-    #     for _ in range(episodes * self.cfg.n_envs * ep_len // ep_len):
-    #         rew_sum = th.zeros(self.cfg.n_envs)
-    #         for _ in range(ep_len):
-    #             mean, std, _ = self.net(obs)
-    #             action = mean  # greedy mean action
-    #             obs, r, d, _ = self.env.step(action)
-    #             obs = obs.to(self.device).float()
-    #             rew_sum += r.cpu()
-    #         total += rew_sum.sum().item()
-    #         count += self.cfg.n_envs
-    #     print(f"Eval: avg episode return = {total / count:.3f}")
+

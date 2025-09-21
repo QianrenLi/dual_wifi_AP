@@ -1,4 +1,5 @@
 import random
+import torch as th
 from typing import Any, Dict, List, Optional, Type
 
 from util.control_cmd import ControlCmd, list_to_cmd, _json_default  # noqa: E402
@@ -17,6 +18,8 @@ class PolicyBase:
         self.action_dim: int = cmd_cls.__dim__()
         if seed is not None:
             random.seed(seed)
+        self.net = None
+        self.opt = None
 
     def tf_act(self, obs_vec: List[float]) -> Dict[str, Any]:
         """TensorFlow action method to be implemented by subclasses."""
@@ -33,3 +36,25 @@ class PolicyBase:
     def _pre_act(self, obs: Dict[str, Any]) -> List[float]:
         """Preprocess obs if needed (default: noop)."""
         return flatten_leaves(obs)
+    
+
+    def train_per_epoch(self):
+        raise NotImplementedError
+    
+    
+    def save(self, path: str):
+        th.save({
+            "model": self.net.state_dict(),
+            "optimizer": self.opt.state_dict(),
+        }, path)
+        
+    def load(self, path: str, device:str):
+        ckpt = th.load(path, map_location=device)
+
+        self.net.load_state_dict(ckpt["model"])
+        self.opt.load_state_dict(ckpt["optimizer"])
+
+        self.net.to(device)
+
+        
+    

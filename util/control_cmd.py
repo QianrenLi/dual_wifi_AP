@@ -120,6 +120,11 @@ class ControlCmd:
             policy_parameters=data["policy_parameters"],
             version=data["version"],
         )
+
+    @property
+    def value(self):
+        value = cmd_to_list(self)
+        return value
             
             
 def cmd_to_list(cmd: ControlCmd) -> List[float]:

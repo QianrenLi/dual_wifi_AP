@@ -2,6 +2,8 @@ video/*
 exp_trace/*/*
 config/*
 net_util/net_config/*
+net_util/net_cp/*
+
 
 __pycache__/
 logs/

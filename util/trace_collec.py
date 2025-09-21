@@ -24,7 +24,16 @@ def flatten_leaves(struct: Any) -> List[float]:
         try:
             leaves.append(float(struct))
         except (ValueError, TypeError):
-            pass  # ignore non-numeric leaves
+            # pass  # ignore non-numeric leaves
+            value = struct.value
+            if isinstance(value, list):
+                leaves.extend(value)
+            # elif isinstance(value, float):
+            #     leaves.append(value)
+            else:
+                print(f"leave {value} is not  added")
+        except:
+            pass
 
     return leaves
 
@@ -33,7 +42,7 @@ def struct_to_numpy(struct: Any) -> np.ndarray:
     return np.array(flatten_leaves(struct), dtype=float)
 
 
-def _apply_rule(value: Any, rule: Rule) -> Any:
+def _apply_rule(value: Any, rule: Rule, args: Optional[dict] = None) -> Any:
     """Apply a single rule to a value.
        Returns transformed value, or None to indicate 'drop'.
     """
@@ -43,13 +52,15 @@ def _apply_rule(value: Any, rule: Rule) -> Any:
     if rule is False or rule is None:
         return None
 
+    # string -> look up registered filter and call with args
     if isinstance(rule, str):
         assert rule in FILTER_REGISTRY, f"Unknown filter '{rule}' not in FILTER_REGISTRY"
-        return _apply_rule(value, FILTER_REGISTRY[rule])
+        func = FILTER_REGISTRY[rule]
+        return func(value, **(args or {}))
 
     # callable handling
     if callable(rule):
-        out = rule(value)
+        out = rule(value, **(args or {}))
         # Treat None / empty dict as 'dropped'
         if out is None:
             return None
@@ -82,9 +93,12 @@ def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]
     # Normalize descriptor into key -> rule mapping (strip 'pos')
     # Allow passing a raw nested rule-mapping (when recursing)
     normalized: Dict[str, Rule] = {}
+    args_map: Dict[str, Dict[str, Any]] = {}
     for k, v in descriptor.items():
         if isinstance(v, Mapping) and "rule" in v:
             normalized[k] = v["rule"]  # standard entry
+            if isinstance(v.get("args"), Mapping):
+                args_map[k] = dict(v["args"])
         else:
             # If caller passed a raw mapping of key->RuleType (nested case), accept it directly
             normalized[k] = v  # type: ignore[assignment]
@@ -95,7 +109,8 @@ def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]
     for key, rule in normalized.items():
         if key in trace:
             v = trace[key]
-            filtered_v = _apply_rule(v, rule)
+            entry_args = args_map.get(key)
+            filtered_v = _apply_rule(v, rule, args=entry_args)
             if filtered_v is not None and (not isinstance(filtered_v, dict) or len(filtered_v) > 0):
                 filtered[key] = filtered_v
 
@@ -104,7 +119,7 @@ def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]
         if key in normalized:
             continue  # already handled
         if isinstance(v, dict):
-            child = trace_filter(v, normalized)  # keep using the same normalized rules
+            child = trace_filter(v, descriptor)  # keep using the same normalized rules
             if isinstance(child, dict) and len(child) > 0:
                 filtered[key] = child
 
@@ -125,8 +140,9 @@ def trace_collec(
     actions = [t.get("action") for t in trace_items]
     states  = [trace_filter(t, state_descriptor)  for t in trace_items]
     rewards = [trace_filter(t, reward_descriptor) for t in trace_items]
+    network_output = [t.get("res") for t in trace_items]
 
-    return states, actions, rewards
+    return states, actions, rewards, network_output
 
 
 if __name__ == "__main__":

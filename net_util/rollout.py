@@ -68,6 +68,8 @@ class RolloutBuffer:
 
         self.advantages = adv
         self.returns = ret
+        
+        print(self.advantages.shape)
 
     def get_minibatches(self, batch_size: int):
         # Flatten T and N
