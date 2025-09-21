@@ -28,68 +28,103 @@ def main():
     duration = args.duration
     exp_name = args.exp_name
 
-    tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=False)
+    tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=True)
     
-    start_time = time.time()
-    
-    ## Start agent
-    src_flows = {}
-    for port, flow in flows.items():
-        if flow.src_sta not in src_flows:
-            src_flows[flow.src_sta] = []
-        src_flows[flow.src_sta].append(flow.flow_name)
-    
-    for tx, srcs in tx_srcs.items():
-        conn.batch(tx, "start_agent", {"control_config": srcs['control_config'], "transmission_config": srcs['transmission_config']})
-    
-    ## Rx
-    wait_time = 0.1
-    for idx, (port, flow) in enumerate(flows.items()):
-        if idx == len(flows) - 1:
-            wait_time = 3
-        if 'file' in flow.npy_file:
-            conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port}).wait(wait_time)
-        else:
-            if args.render:
-                ## Wait due to the late start of xterm
-                conn.batch(flow.dst_sta, "receive_file_gui", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]} --rx-mode'}).wait(wait_time)
-            else:
-                conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]}'}).wait(wait_time)
-
-    # # Tx
-    for tx, srcs in tx_srcs.items():
-        print(f"Transmission: {tx}")
-        config_path = "/".join(srcs['transmission_config'].split("/")[1:])
-        conn.batch(tx, "send_file", {"duration": duration, "config": config_path})
-
-    # Get Result
-    conn.executor.fetch()
+    iteration = 1
     while True:
-        try:
-            res = conn.apply()
-            break
-        except Exception as e:
-            time.sleep(1)
-
-    res = [r for r in res if r != {}]
-    print(res)
-
-    # Pull RTT logs
-    log_dir = "stream-replay/logs"
-
-    folder = f'exp_trace/{exp_name}/trial_{datetime.now().strftime("%Y%m%d-%H%M%S")}'
-    for flow in flows.values():
-        client = flow.src_sta
-        file_name = flow_to_rtt_log(flow)
-        Connector(client).sync_file(f'{log_dir}/{file_name}')
-        os.makedirs(f'{folder}', exist_ok=True)
-        os.rename(f'{log_dir}/{file_name}', f'{folder}/{file_name}')
+        start_time = time.time()
+        ## Start agent
+        src_flows = {}
+        for port, flow in flows.items():
+            if flow.src_sta not in src_flows:
+                src_flows[flow.src_sta] = []
+            src_flows[flow.src_sta].append(flow.flow_name)
         
-    for tx, srcs in tx_srcs.items():
-        # Connector(tx).sync_file('logs/agent/rollout.jsonl')
-        os.rename('logs/agent/rollout.jsonl', f'{folder}/rollout.jsonl')
+        for tx, srcs in tx_srcs.items():
+            conn.batch(tx, "start_agent", {"control_config": srcs['control_config'], "transmission_config": srcs['transmission_config']})
+        
+        ## Rx
+        wait_time = 0.1
+        for idx, (port, flow) in enumerate(flows.items()):
+            if idx == len(flows) - 1:
+                wait_time = 3
+            if 'file' in flow.npy_file:
+                conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port}).wait(wait_time)
+            else:
+                if args.render:
+                    ## Wait due to the late start of xterm
+                    conn.batch(flow.dst_sta, "receive_file_gui", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]} --rx-mode'}).wait(wait_time)
+                else:
+                    conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]}'}).wait(wait_time)
 
-    print("Execution time:", time.time() - start_time)
+        # # Tx
+        for tx, srcs in tx_srcs.items():
+            print(f"Transmission: {tx}")
+            config_path = "/".join(srcs['transmission_config'].split("/")[1:])
+            conn.batch(tx, "send_file", {"duration": duration, "config": config_path})
 
+        # Get Result
+        conn.executor.fetch()
+        while True:
+            try:
+                res = conn.apply()
+                break
+            except Exception as e:
+                time.sleep(1)
+
+        res = [r for r in res if r != {}]
+        print(res)
+        exp_time = time.time()
+        
+        # Pull RTT logs
+        log_dir = "stream-replay/logs"
+
+        folder = f'exp_trace/{exp_name}/trial_{datetime.now().strftime("%Y%m%d-%H%M%S")}'
+        for flow in flows.values():
+            client = flow.src_sta
+            file_name = flow_to_rtt_log(flow)
+            Connector(client).sync_file(f'{log_dir}/{file_name}')
+            os.makedirs(f'{folder}', exist_ok=True)
+            os.rename(f'{log_dir}/{file_name}', f'{folder}/{file_name}')
+            
+        for tx, srcs in tx_srcs.items():
+            # Connector(tx).sync_file('logs/agent/rollout.jsonl')
+            os.rename('logs/agent/rollout.jsonl', f'{folder}/rollout.jsonl')
+        
+        
+        
+        ## Forward the rollout.jsonl to the Train Agent
+        for tx, srcs in tx_srcs.items():
+            Connector('TrainAgent').sync_file(f'{folder}/rollout.jsonl', is_pull=False)
+        
+        exp_sync_time = time.time()
+        
+        ## TODO: integrated training
+        if iteration > 0:
+            conn.batch('TrainAgent', "model_train", {"control_config": srcs['control_config'], "trace_path": f'{folder}/rollout.jsonl', 'load_path': f'net_util/net_cp/{exp_name}/{iteration}.pt'})
+        else:
+            conn.batch('TrainAgent', "model_train", {"control_config": srcs['control_config'], "trace_path": f'{folder}/rollout.jsonl'})
+        
+        conn.executor.fetch()
+        while True:
+            try:
+                res = conn.apply()
+                break
+            except Exception as e:
+                time.sleep(1)
+        
+        train_time = time.time()
+        
+        iteration += 1
+        Connector('TrainAgent').sync_file(f'net_util/net_cp/{exp_name}/{iteration}.pt', is_pull=True)
+        Connector('TrainAgent').sync_file(f'net_util/logs/train.log', is_pull=True)
+        os.rename('net_util/logs/train.log', f'{folder}/train.log')
+        
+        print(f"Iteration {iteration-1}:")
+        current_time = time.time()
+        print(f"Exp time {exp_time - start_time}; Sync time {exp_sync_time - exp_time}; Train Time: {train_time - exp_sync_time}; Model Pull Time: {current_time - train_time}")
+        print(f"Iteration {iteration-1} Execution time:",  - start_time)
+        
+        
 if __name__ == "__main__":
     main()

@@ -4,6 +4,7 @@
         "manifest": "manifest.json",
         "tap": "tap.py",
         "agent": "agent.py",
+        "train_rl": "train_rl.py",
         "util": "util",
         "net_util": "net_util",
         "tools": "tools",
@@ -166,6 +167,17 @@
             },
             "commands":[
                 "echo $password | sudo -S killall stream-replay-rx"
+            ]
+        },
+        "model_train":{
+            "description": "train the rl model",
+            "parameters":{
+                "control_config": "data/control_config.json",
+                "trace_path": "data/test.json",
+                "load_path": "none"
+            },
+            "commands":[
+                "python train_rl.py --control_config $control_config --trace_path $trace_path --load_path $load_path"
             ]
         }
     }

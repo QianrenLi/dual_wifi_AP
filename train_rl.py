@@ -175,12 +175,13 @@ def main():
     policy_cfg = _inflate_dataclass_from_manifest(policy_cfg_cls, policy_cfg)
     policy: PolicyBase = policy_cls( ControlCmd, policy_cfg, rollout_buffer=rollout_buffer, device = "cuda")
     
-    if args.load_path is not None:
+    if args.load_path is None or args.load_path == "none":
+        store_path = Path("net_util/net_cp") / Path(args.control_config).parent.stem / "1.pt"
+    else:
         policy.load(args.load_path, device = 'cuda')
         next_id = int(Path(args.load_path).stem) + 1
         store_path = Path(args.load_path).parent / f"{next_id}.pt"
-    else:
-        store_path = Path("net_util/net_cp") / Path(args.control_config).parent.stem / "1.pt"
+        
     os.makedirs(store_path.parent, exist_ok=True)
     print(store_path)
     

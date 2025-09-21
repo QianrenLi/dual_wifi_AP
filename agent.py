@@ -185,7 +185,6 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict):
             # Enforce duration *immediately after* stats collection (higher priority than iterations)
             if cfg.duration is not None and first_ok_stats_t is not None:
                 elapsed = time.time() - first_ok_stats_t
-                print(elapsed)
                 if elapsed >= cfg.duration:
                     print(f"[INFO] Duration reached: elapsed={elapsed:.3f}s ≥ {cfg.duration:.3f}s. "
                           f"Stopping before sending further actions.")
@@ -272,10 +271,10 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
     policy_cfg_cls = POLICY_CFG_REGISTRY[policy_name]
     policy_cls = POLICY_REGISTRY[policy_name]
     
-    policy_cfg = _inflate_dataclass_from_manifest(policy_cfg_cls, policy_cfg)
-    policy: PolicyBase = policy_cls( ControlCmd, policy_cfg)
+    policy_construct_cfg = _inflate_dataclass_from_manifest(policy_cfg_cls, policy_cfg)
+    policy: PolicyBase = policy_cls( ControlCmd, policy_construct_cfg)
     
-    policy_load_path = policy_cfg["load_path"]
+    policy_load_path = policy_cfg['load_path']
     policy_cp_path = Path("net_util/net_cp") / Path(args.control_config).parent.stem
     if policy_load_path == 'latest':
         ids = [int(p.stem) for p in policy_cp_path.glob("*.pt") if p.stem.isdigit()]
@@ -284,6 +283,7 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
         else:
             policy_load_path = policy_cp_path / f"{max(ids)}.pt"
     if policy_load_path:
+        print(f"PPO Load {policy_load_path}")
         policy.load(policy_load_path, device=policy_cfg['device'])
     state_cfg = control_config.get('state_cfg', None)
     
