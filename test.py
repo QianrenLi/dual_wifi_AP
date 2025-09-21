@@ -30,7 +30,7 @@ def main():
 
     tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=True)
     
-    iteration = 1
+    iteration = 0
     while True:
         start_time = time.time()
         ## Start agent
@@ -123,7 +123,7 @@ def main():
         print(f"Iteration {iteration-1}:")
         current_time = time.time()
         print(f"Exp time {exp_time - start_time}; Sync time {exp_sync_time - exp_time}; Train Time: {train_time - exp_sync_time}; Model Pull Time: {current_time - train_time}")
-        print(f"Iteration {iteration-1} Execution time:",  - start_time)
+        print(f"Iteration {iteration-1} Execution time:", current_time - start_time)
         
         
 if __name__ == "__main__":

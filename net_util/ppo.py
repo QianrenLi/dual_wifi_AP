@@ -32,7 +32,10 @@ class PPO_Config:
     target_kl: float = 0.03  # None to disable
     
     network_module_path = "net_util.model.ac"
-    
+
+def _safe_mean(xs):
+    return float(np.mean(xs)) if xs else float("nan")
+
 @register_policy
 class PPO(PolicyBase):
     def __init__(self, cmd_cls, cfg: PPO_Config, rollout_buffer: RolloutBuffer = None, device = None):
@@ -50,72 +53,101 @@ class PPO(PolicyBase):
         
         self.buf = rollout_buffer
 
-    def _ppo_update(self):
+    def _ppo_update(self, f):
         clip = self.cfg.clip_range
         ent_coef, vf_coef = self.cfg.ent_coef, self.cfg.vf_coef
         max_grad_norm = self.cfg.max_grad_norm
         buf = self.buf
-        
-        # Advantage normalization (per update)
+
+        # Advantage normalization (once per update)
         adv = buf.advantages.view(-1)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         buf.advantages = adv.view(buf.size, buf.n_envs)
 
         for epoch in range(self.cfg.n_epochs):
+            # Per-epoch meters
+            policy_loss_meter, value_loss_meter, entropy_meter = [], [], []
+            total_loss_meter, kl_meter, clipfrac_meter = [], [], []
+
             approx_kls = []
             for obs, act, old_logp, adv, ret, old_v in buf.get_minibatches(self.cfg.batch_size):
                 values, logp, entropy = self.net.evaluate_actions(obs, act)
                 ratio = th.exp(logp - old_logp)
 
-                # Policy loss (clipped surrogate)
+                # PPO losses
                 pg1 = adv * ratio
                 pg2 = adv * th.clamp(ratio, 1.0 - clip, 1.0 + clip)
                 policy_loss = -th.min(pg1, pg2).mean()
-
-                # Value loss (no vf clipping here for brevity)
                 value_loss = F.mse_loss(ret, values)
-
-                # Entropy bonus
                 entropy_loss = -entropy.mean()
-
                 loss = policy_loss + vf_coef * value_loss + ent_coef * entropy_loss
 
-                # KL approx for early stop
+                # Metrics (KL & clipfrac)
                 with th.no_grad():
                     log_ratio = logp - old_logp
                     approx_kl = ((th.exp(log_ratio) - 1) - log_ratio).mean().item()
                     approx_kls.append(approx_kl)
+                    clipped = ((ratio > (1.0 + clip)) | (ratio < (1.0 - clip))).float().mean().item()
 
+                # Step
                 self.opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.net.parameters(), max_grad_norm)
                 self.opt.step()
 
-            if self.cfg.target_kl is not None:
-                if np.mean(approx_kls) > 1.5 * self.cfg.target_kl:
-                    break
+                # Collect per-minibatch stats
+                policy_loss_meter.append(policy_loss.item())
+                value_loss_meter.append(value_loss.item())
+                entropy_meter.append(entropy.mean().item())
+                total_loss_meter.append(loss.item())
+                kl_meter.append(approx_kl)
+                clipfrac_meter.append(clipped)
+
+            # Early stop on KL (per-epoch)
+            if self.cfg.target_kl is not None and np.mean(approx_kls) > 1.5 * self.cfg.target_kl:
+                early_stop = True
+            else:
+                early_stop = False
+
+            # Per-epoch log extras (exp var / avg return / log_std)
+            with th.no_grad():
+                ev = 1.0 - th.var((buf.returns - buf.values).view(-1)) / (th.var(buf.returns.view(-1)) + 1e-8)
+                avg_ret = buf.returns.view(-1).mean().item()
+                try:
+                    lr = next(iter(self.opt.param_groups))["lr"]
+                except Exception:
+                    lr = float("nan")
+
+            # ---- Write ONE line per epoch ----
+            msg = (
+                f"[epoch {epoch+1:03d}/{self.cfg.n_epochs:03d}] "
+                f"avg_return={avg_ret:8.3f}  "
+                f"exp_var={ev.item():6.3f}  "
+                f"log_std={self.net.log_std.data.mean():6.3f}  "
+                f"loss={_safe_mean(total_loss_meter):8.5f}  "
+                f"pol_loss={_safe_mean(policy_loss_meter):8.5f}  "
+                f"val_loss={_safe_mean(value_loss_meter):8.5f}  "
+                f"entropy={_safe_mean(entropy_meter):7.5f}  "
+                f"kl={_safe_mean(kl_meter):7.5f}  "
+                f"clipfrac={_safe_mean(clipfrac_meter):6.3f}  "
+                f"lr={lr:.3e}"
+            )
+            if early_stop:
+                msg += "  [early_stop:KL]"
+            f.write(msg + "\n")
+            f.flush()
+
+            # if early_stop:
+            #     break
 
     def train_per_epoch(self, log_path: str = "net_util/logs/train.log"):
-        with open(log_path, "a") as f:
-            for upd in range(self.cfg.n_updates):
-                self._ppo_update()
-                # Simple logging
-                with th.no_grad():
-                    ev = 1.0 - th.var((self.buf.returns - self.buf.values).view(-1)) / (
-                        th.var(self.buf.returns.view(-1)) + 1e-8
-                    )
-                    avg_ret = self.buf.returns.view(-1).mean().item()
-                    msg = (f"[{upd+1:04d}/{self.cfg.n_updates:04d}] "
-                        f"avg_return={avg_ret:8.3f}  "
-                        f"exp_var={ev.item():6.3f}  "
-                        f"log_std={self.net.log_std.data.mean():6.3f}\n")
-                f.write(msg)
-                f.flush()   # ensures it's written to disk
+        with open(log_path, "w") as f:
+            self._ppo_update(f)
 
     @th.no_grad()
     def tf_act(self, obs_vec):
         obs = th.tensor(obs_vec, device=self.device).float()
-        action, log_prob, value = self.net(obs)
+        action, log_prob, value = self.net.act(obs)
         return {
             "action": action.cpu().numpy(),
             "log_prob": log_prob.cpu().numpy(),

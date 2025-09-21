@@ -121,13 +121,17 @@ def build_rollout_buffer_from_trace_flat(
 
     for t in range(T):
         obs_t = th.tensor(_as_1d_float(states[t]),  dtype=th.float32, device=device).unsqueeze(0)   # [1, obs_dim]
-        act_t = th.tensor(_as_1d_float(actions[t]), dtype=th.float32, device=device).unsqueeze(0)   # [1, act_dim]
+        # act_t = th.tensor(_as_1d_float(actions[t]), dtype=th.float32, device=device).unsqueeze(0)   # [1, act_dim]
 
         # rewards already 1-D list → aggregate to scalar
         r_arr = _as_1d_float(rewards[t])
         rew_t = th.tensor([agg(r_arr)], dtype=th.float32, device=device)                            # [1]
 
         net_t = network_output[t]
+        
+        act_vec = _extract(net_t, ["action"], default=None)
+        act_t = th.tensor(act_vec, dtype=th.float32, device=device).unsqueeze(0)
+        
         logp_vec = _extract(net_t, ["log_prob", "logp", "logprob", "log_probs"], default=None)
         logp_t  = th.tensor([_sum_logp(logp_vec)], dtype=th.float32, device=device)                 # [1]
 
