@@ -6,7 +6,8 @@
         "agent": "agent.py",
         "train_rl": "train_rl.py",
         "util": "util",
-        "net_util": "net_util",
+        "net_util": "net_util/*.py",
+        "net_util/model": "net_util/model/*.py",
         "tools": "tools",
         "data": "stream-replay/data",
         "core": "stream-replay/core",
@@ -85,6 +86,16 @@
             },
             "commands": [
                 "python agent.py --control_config $control_config --transmission_config $transmission_config"
+            ]
+        },
+        "start_agent_eval":{
+            "description": "Run the agent to apply control and optimization.",
+            "parameters":{
+                "control_config": "data/control_config.json",
+                "transmission_config": "data/test.json"
+            },
+            "commands": [
+                "python agent.py --control_config $control_config --transmission_config $transmission_config --eval"
             ]
         },
         "warm_up":{

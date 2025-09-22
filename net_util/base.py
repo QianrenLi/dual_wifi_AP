@@ -21,14 +21,14 @@ class PolicyBase:
         self.net = None
         self.opt = None
 
-    def tf_act(self, obs_vec: List[float]) -> Dict[str, Any]:
+    def tf_act(self, obs_vec: List[float], is_evaluate = False) -> Dict[str, Any]:
         """TensorFlow action method to be implemented by subclasses."""
         raise NotImplementedError
 
     # --- policy API ---
-    def act(self, obs: Dict[str, Any]) -> List[float]:
+    def act(self, obs: Dict[str, Any], is_evaluate = False) -> List[float]:
         """Deterministic base action (vector of length action_dim)."""
-        res = self.tf_act(self._pre_act(obs))
+        res = self.tf_act(self._pre_act(obs), is_evaluate)
         safe_res = {str(k): (v.tolist() if hasattr(v, "tolist") else v) for k, v in res.items()}
         return safe_res, list_to_cmd(self.cmd_cls, safe_res['action'])
         

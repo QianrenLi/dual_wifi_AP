@@ -26,7 +26,7 @@ def gae(
 
 def td0(
     rewards: th.Tensor, values: th.Tensor, dones: th.Tensor, last_value: th.Tensor,
-    gamma: float = 0.99
+    gamma: float = 0.99, **estimator_kwargs
 ) -> Tuple[th.Tensor, th.Tensor]:
     T, N = rewards.shape
     adv = th.zeros_like(rewards)
@@ -41,7 +41,7 @@ def td0(
 
 def mc(
     rewards: th.Tensor, values: th.Tensor, dones: th.Tensor, last_value: th.Tensor,
-    gamma: float = 0.99
+    gamma: float = 0.99, **estimator_kwargs
 ) -> Tuple[th.Tensor, th.Tensor]:
     T, N = rewards.shape
     ret = th.zeros_like(rewards)

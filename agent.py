@@ -148,7 +148,7 @@ def ipc_get_statistics(ctrl: ipc_control,
 # -------------------------
 # Main agent loop
 # -------------------------
-def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict):
+def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bool):
     ensure_dir(cfg.out_dir)
     jsonl_path = cfg.out_dir / "rollout.jsonl"
 
@@ -196,7 +196,7 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict):
             obs_for_policy = {} if timed_out else trace_filter(stats, state_cfg)
             
             # 2) Base action + stochastic exploration
-            res, control_cmd = policy.act(obs_for_policy)
+            res, control_cmd = policy.act(obs_for_policy, is_eval)
 
             # Build ControlCmd using canonical mapping (pads/trims internally)
             control_body: Dict[str, ControlCmd] = {}
@@ -246,6 +246,7 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
     p = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
     p.add_argument("--control_config", type=str, required=True)
     p.add_argument("--transmission_config", type=str, required=True)
+    p.add_argument("--eval", action="store_true")
     
     args = p.parse_args()
     
@@ -287,12 +288,12 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
         policy.load(policy_load_path, device=policy_cfg['device'])
     state_cfg = control_config.get('state_cfg', None)
     
-    return cfg, policy, state_cfg
+    return cfg, policy, state_cfg, args.eval
     
 def main():
     try:
-        cfg, policy, state_cfg = parse_args()
-        run_agent(cfg, policy, state_cfg)
+        cfg, policy, state_cfg, is_eval = parse_args()
+        run_agent(cfg, policy, state_cfg, is_eval)
     except GracefulExit:
         print("\n[INFO] Caught interrupt, exiting.")
     except KeyboardInterrupt:

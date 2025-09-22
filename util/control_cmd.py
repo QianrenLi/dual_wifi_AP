@@ -72,7 +72,7 @@ class CInt:
     def __init__(self, value: int):
         if isinstance(value, list):
             value = value[0]
-        value = int(value * (self.value_range[1] - self.value_range[0]) + self.value_range[0])
+        value = int(value * (self.value_range[1] - self.value_range[0]) + (self.value_range[1] - self.value_range[0]) / 2)
         lo, hi = self.value_range
         if lo is not None and value < lo:
             value = lo

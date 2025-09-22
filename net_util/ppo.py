@@ -145,9 +145,12 @@ class PPO(PolicyBase):
             self._ppo_update(f)
 
     @th.no_grad()
-    def tf_act(self, obs_vec):
+    def tf_act(self, obs_vec, is_evaluate = False):
         obs = th.tensor(obs_vec, device=self.device).float()
-        action, log_prob, value = self.net.act(obs)
+        if is_evaluate:
+            action, log_prob, value = self.net(obs)
+        else:
+            action, log_prob, value = self.net.act(obs)
         return {
             "action": action.cpu().numpy(),
             "log_prob": log_prob.cpu().numpy(),

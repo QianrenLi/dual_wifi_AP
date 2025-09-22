@@ -34,7 +34,7 @@ def bitrate_delta(value: Any, alpha: float = 1.0, beta: float = 0.0):
                 continue
             key = str(k)
             prev = prev_store.get(key)
-            delta = 0.0 if prev is None else float(v) - float(prev)
+            delta = 0.0 if prev is None else abs(float(v) - float(prev))
             prev_store[key] = float(v)
             out[key] = alpha * float(v) + beta * delta
         return out
