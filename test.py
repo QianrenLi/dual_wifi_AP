@@ -16,7 +16,7 @@ def apply_exist_command(conn:Connector):
             continue
     return outputs
 
-def train_loop(args, conn:Connector, tx_srcs, flows, duration, exp_name):
+def train_loop(args, conn:Connector, tx_srcs, tx_flows, inter_srcs, inter_flows, duration, exp_name):
     traces = []
     maximum_trace_len = 5
     
@@ -25,7 +25,7 @@ def train_loop(args, conn:Connector, tx_srcs, flows, duration, exp_name):
         start_time = time.time()
         ## Start agent
         src_flows = {}
-        for port, flow in flows.items():
+        for port, flow in tx_flows.items():
             if flow.src_sta not in src_flows:
                 src_flows[flow.src_sta] = []
             src_flows[flow.src_sta].append(flow.flow_name)
@@ -35,8 +35,16 @@ def train_loop(args, conn:Connector, tx_srcs, flows, duration, exp_name):
         
         ## Rx
         wait_time = 0.1
-        for idx, (port, flow) in enumerate(flows.items()):
-            if idx == len(flows) - 1:
+        
+        for idx, (port, flow) in enumerate(inter_flows.items()):
+            if 'file' in flow.npy_file:
+                conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port})
+            else:
+                conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]}'})
+                
+        
+        for idx, (port, flow) in enumerate(tx_flows.items()):
+            if idx == len(tx_flows) - 1:
                 wait_time = 3
             if 'file' in flow.npy_file:
                 conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port}).wait(wait_time)
@@ -52,6 +60,11 @@ def train_loop(args, conn:Connector, tx_srcs, flows, duration, exp_name):
             print(f"Transmission: {tx}")
             config_path = "/".join(srcs['transmission_config'].split("/")[1:])
             conn.batch(tx, "send_file", {"duration": duration, "config": config_path})
+            
+        for int_tx, srcs in inter_srcs.items():
+            print(f"Transmission: {tx}")
+            config_path = "/".join(srcs['transmission_config'].split("/")[1:])
+            conn.batch(int_tx, "send_file_with_out_mon", {"duration": duration, "config": config_path})
 
         # Get Result
         conn.executor.fetch()
@@ -81,15 +94,13 @@ def train_loop(args, conn:Connector, tx_srcs, flows, duration, exp_name):
                     shutil.rmtree(p, ignore_errors=True)
         # ---------------------------------------------------------
         
-        for flow in flows.values():
+        for flow in tx_flows.values():
             client = flow.src_sta
             file_name = flow_to_rtt_log(flow)
             Connector(client).sync_file(f'{log_dir}/{file_name}')
             os.makedirs(f'{folder}', exist_ok=True)
             os.rename(f'{log_dir}/{file_name}', f'{folder}/{file_name}')
 
-
-            
         for tx, srcs in tx_srcs.items():
             # Connector(tx).sync_file('logs/agent/rollout.jsonl')
             os.rename('logs/agent/rollout.jsonl', f'{folder}/rollout.jsonl')
@@ -138,10 +149,10 @@ def train_loop(args, conn:Connector, tx_srcs, flows, duration, exp_name):
         
         
         
-def evaluate(args, conn, tx_srcs, flows, duration, exp_name):
+def evaluate(args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows, duration, exp_name):
     ## Start agent
     src_flows = {}
-    for port, flow in flows.items():
+    for port, flow in tx_flows.items():
         if flow.src_sta not in src_flows:
             src_flows[flow.src_sta] = []
         src_flows[flow.src_sta].append(flow.flow_name)
@@ -151,8 +162,15 @@ def evaluate(args, conn, tx_srcs, flows, duration, exp_name):
     
     ## Rx
     wait_time = 0.1
-    for idx, (port, flow) in enumerate(flows.items()):
-        if idx == len(flows) - 1:
+    for idx, (port, flow) in enumerate(inter_flows.items()):
+        if 'file' in flow.npy_file:
+            conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port})
+        else:
+            conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port, 'hyper_parameters': f'--calc-rtt --src-ipaddrs {flow.tx_ipaddrs[0]}'})
+            
+    
+    for idx, (port, flow) in enumerate(tx_flows.items()):
+        if idx == len(tx_flows) - 1:
             wait_time = 3
         if 'file' in flow.npy_file:
             conn.batch(flow.dst_sta, "receive_file", {"duration": duration, "port": port}).wait(wait_time)
@@ -168,6 +186,11 @@ def evaluate(args, conn, tx_srcs, flows, duration, exp_name):
         print(f"Transmission: {tx}")
         config_path = "/".join(srcs['transmission_config'].split("/")[1:])
         conn.batch(tx, "send_file", {"duration": duration, "config": config_path})
+        
+    for int_tx, srcs in inter_srcs.items():
+        print(f"Transmission: {tx}")
+        config_path = "/".join(srcs['transmission_config'].split("/")[1:])
+        conn.batch(int_tx, "send_file_with_out_mon", {"duration": duration, "config": config_path})
 
     # Get Result
     conn.executor.fetch()
@@ -186,7 +209,7 @@ def evaluate(args, conn, tx_srcs, flows, duration, exp_name):
     log_dir = "stream-replay/logs"
 
     folder = f'exp_trace/{exp_name}/trial_{datetime.now().strftime("%Y%m%d-%H%M%S")}'
-    for flow in flows.values():
+    for flow in tx_flows.values():
         client = flow.src_sta
         file_name = flow_to_rtt_log(flow)
         Connector(client).sync_file(f'{log_dir}/{file_name}')
@@ -213,12 +236,12 @@ def main():
     exp_name = args.exp_name
 
         
-    tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=True)
+    tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config(exp_name, conn, is_update=True)
     
     if args.evaluate:
-        evaluate(args, conn, tx_srcs, flows, duration, exp_name)
+        evaluate(args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows, duration, exp_name)
     else:
-        train_loop(args, conn, tx_srcs, flows, duration, exp_name)
+        train_loop(args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows, duration, exp_name)
 
         
         

@@ -54,14 +54,30 @@ def create_transmission_config(config_name, conn: Connector, is_update=False):
             with open(data_path, "w") as f:
                 f.write(json.dumps(policy_configs[src][dest], indent=4))
             tx_srcs[src]['control_config'] = data_path
-
+    
+    ## Create interference source
+    inter_src = {}
+    inter_flow = {}
+    if hasattr(cfg, "interference_streams") and callable(getattr(cfg, "interference_streams")):
+        inter_configs = cfg.interference_streams(ip_table)
+        inter_flow = reshape_to_flows_by_port(inter_configs)
+        for src, config in inter_configs.items():
+            inter_src[src] = {}
+            ## assert only one dest in config
+            assert len(config) == 1, "Only support one dest in config"
+            for dest, stream_config in config.items():
+                data_path = f"{tx_folder}/{src}_{dest}.json"
+                with open(data_path, "w") as f:
+                    f.write(json.dumps(stream_config, indent=4))
+                inter_src[src]['transmission_config'] = data_path
+            
     if is_update:         
         ## Sync the config_name folder to all clients
         for client in clients:
             Connector(client).sync_file(tx_folder, is_pull=False)
             Connector(client).sync_file(network_folder, is_pull=False)
             
-    return tx_srcs, flows
+    return tx_srcs, flows, inter_src, inter_flow
 
 if __name__ == "__main__":
     # conn = Connector()
