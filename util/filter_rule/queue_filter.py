@@ -1,17 +1,18 @@
+import ipaddress
 from . import register_filter 
 
 @register_filter
-def queues_only_ac1(queues, ac_key = 1, default: int = 0):
+def queues_only_ac1(queues, ac_key=1, default: int = 0): #[Warning]: This filter function do not guarentee the exact 5g and 2.4 relationshipt=
     """
     queues value looks like:
     {
         "192.168.3.61": {"2": 0, "0": 0},
         "192.168.3.25": {"0": 0, "2": 0}
     }
-    We return:
+    We return (sorted by IP address):
     {
-        "192.168.3.61": {"1": 0},
-        "192.168.3.25": {"1": 0}
+        "192.168.3.25": {"1": 0},
+        "192.168.3.61": {"1": 0}
     }
     (use default if AC '1' missing)
     """
@@ -19,10 +20,12 @@ def queues_only_ac1(queues, ac_key = 1, default: int = 0):
         return {}
     want_keys = {str(ac_key), int(ac_key) if isinstance(ac_key, str) and ac_key.isdigit() else ac_key}
     out = {}
-    for dev, ac_map in queues.items():
+
+    # sort by numeric IP order
+    for dev in sorted(queues.keys(), key=lambda ip: ipaddress.ip_address(ip)):
+        ac_map = queues[dev]
         if not isinstance(ac_map, dict):
             continue
-        # accept both str and int forms
         val = None
         for k in want_keys:
             if k in ac_map:

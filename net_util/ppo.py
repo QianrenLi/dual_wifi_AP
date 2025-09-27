@@ -36,6 +36,9 @@ class PPO_Config:
 def _safe_mean(xs):
     return float(np.mean(xs)) if xs else float("nan")
 
+def symlog(x: th.Tensor, eps=1e-12) -> th.Tensor:
+    return th.sign(x) * th.log(th.abs(x) + 1.0 + eps)
+
 @register_policy
 class PPO(PolicyBase):
     def __init__(self, cmd_cls, cfg: PPO_Config, rollout_buffer: RolloutBuffer = None, device = None):
@@ -59,11 +62,6 @@ class PPO(PolicyBase):
         max_grad_norm = self.cfg.max_grad_norm
         buf = self.buf
 
-        # Advantage normalization (once per update)
-        adv = buf.advantages.view(-1)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-        buf.advantages = adv.view(buf.size, buf.n_envs)
-
         for epoch in range(self.cfg.n_epochs):
             # Per-epoch meters
             policy_loss_meter, value_loss_meter, entropy_meter = [], [], []
@@ -78,7 +76,7 @@ class PPO(PolicyBase):
                 pg1 = adv * ratio
                 pg2 = adv * th.clamp(ratio, 1.0 - clip, 1.0 + clip)
                 policy_loss = -th.min(pg1, pg2).mean()
-                value_loss = F.mse_loss(ret, values)
+                value_loss = F.mse_loss(symlog(ret), symlog(values))
                 entropy_loss = -entropy.mean()
                 loss = policy_loss + vf_coef * value_loss + ent_coef * entropy_loss
 

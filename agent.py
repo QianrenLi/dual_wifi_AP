@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, get_args, get_origin, Union
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from net_util.base import PolicyBase
 from util.ipc import ipc_control  # noqa: E402
-from util.control_cmd import ControlCmd, _json_default  # noqa: E402
+from util.control_cmd import ControlCmd, _json_default, revive_jsonlike  # noqa: E402
 from util.trace_collec import trace_filter
 from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY
 
@@ -100,6 +100,7 @@ class AgentConfig:
     fail_fast: bool
     out_dir: Path
     duration: Optional[float] = None  # seconds; if set, overrides iterations
+    default_cmd: Optional[Dict] = None
 
 
 class GracefulExit(Exception):
@@ -194,10 +195,14 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
                 continue
             
             obs_for_policy = {} if timed_out else trace_filter(stats, state_cfg)
+            # print(obs_for_policy)
             
             # 2) Base action + stochastic exploration
-            res, control_cmd = policy.act(obs_for_policy, is_eval)
-
+            if cfg.default_cmd is not None:
+                control_cmd:ControlCmd = revive_jsonlike(cfg.default_cmd)
+                res = None
+            else:
+                res, control_cmd = policy.act(obs_for_policy, is_eval)
             # Build ControlCmd using canonical mapping (pads/trims internally)
             control_body: Dict[str, ControlCmd] = {}
             ## TODO: handle multi-link control
@@ -286,8 +291,7 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
     if policy_load_path:
         print(f"PPO Load {policy_load_path}")
         policy.load(policy_load_path, device=policy_cfg['device'])
-    state_cfg = control_config.get('state_cfg', None)
-    
+    state_cfg = control_config.get('state_cfg', None)    
     return cfg, policy, state_cfg, args.eval
     
 def main():

@@ -41,3 +41,19 @@ def bitrate_delta(value: Any, alpha: float = 1.0, beta: float = 0.0):
 
     # unsupported shape
     return None
+
+
+@register_filter
+def stat_bitrate(value: Any, alpha: float = 1e-6):
+    """
+    Compute zeta * outage_rate. Works for scalar or dict-of-scalars.
+    """
+    if _is_num(value):
+        return alpha * float(value)
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if _is_num(v):
+                out[str(k)] = alpha * float(v)
+        return out
+    return None

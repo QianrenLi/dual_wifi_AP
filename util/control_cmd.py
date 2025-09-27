@@ -17,6 +17,19 @@ def register_jo(name: str | None = None):
         return obj
     return _decorator
 
+def revive_jsonlike(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        # First, recursively revive children
+        revived = {k: revive_jsonlike(v) for k, v in obj.items()}
+        # Then, give the dict to your hook (so it can detect __class__/__data__)
+        return _json_object_hook(revived)
+    elif isinstance(obj, list):
+        return [revive_jsonlike(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(revive_jsonlike(v) for v in obj)
+    else:
+        return obj
+
 def _json_default(o):
     if hasattr(o, "to_jsonable"):
         return {"__class__": o.__class__.__name__, "__data__": o.to_jsonable()}
@@ -93,7 +106,7 @@ class CInt:
 @register_jo()
 class C_LIST_FLOAT_DIM4_RANGE_POSITIVE(CListFloat):
     dim = 4
-    value_range = (0, np.inf)
+    value_range = (0.0, np.inf)
 
 @register_jo()
 class C_INT_RANGE_0_13(CInt):

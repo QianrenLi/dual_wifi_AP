@@ -1,6 +1,7 @@
 import time
 import os
 import argparse
+import shutil
 from datetime import datetime
 from util.exp_setup import create_transmission_config
 from util.flows import flow_to_rtt_log
@@ -17,9 +18,9 @@ def apply_exist_command(conn:Connector):
 
 def train_loop(args, conn:Connector, tx_srcs, flows, duration, exp_name):
     traces = []
-    maximum_trace_len = 10
+    maximum_trace_len = 5
     
-    iteration = 0
+    iteration = 0 #TODO: refresh the experiment setup
     while True:
         start_time = time.time()
         ## Start agent
@@ -69,18 +70,29 @@ def train_loop(args, conn:Connector, tx_srcs, flows, duration, exp_name):
         log_dir = "stream-replay/logs"
 
         folder = f'exp_trace/{exp_name}/trial_{datetime.now().strftime("%Y%m%d-%H%M%S")}'
+        
+        # --- CLEAN STEP (run only on the very first iteration) ---
+        model_dir = f'net_util/net_cp/{exp_name}'
+        if iteration == 0:
+            # remove the per-trial folder (if it oddly exists) and the model dir
+            for p in (f'exp_trace/{exp_name}', model_dir):
+                if os.path.exists(p):
+                    print(f"[clean] removing {p}")
+                    shutil.rmtree(p, ignore_errors=True)
+        # ---------------------------------------------------------
+        
         for flow in flows.values():
             client = flow.src_sta
             file_name = flow_to_rtt_log(flow)
             Connector(client).sync_file(f'{log_dir}/{file_name}')
             os.makedirs(f'{folder}', exist_ok=True)
             os.rename(f'{log_dir}/{file_name}', f'{folder}/{file_name}')
+
+
             
         for tx, srcs in tx_srcs.items():
             # Connector(tx).sync_file('logs/agent/rollout.jsonl')
             os.rename('logs/agent/rollout.jsonl', f'{folder}/rollout.jsonl')
-        
-        
         
         ## Forward the rollout.jsonl to the Train Agent
         for tx, srcs in tx_srcs.items():
@@ -110,13 +122,20 @@ def train_loop(args, conn:Connector, tx_srcs, flows, duration, exp_name):
         
         iteration += 1
         Connector('TrainAgent').sync_file(f'net_util/net_cp/{exp_name}/{iteration}.pt', is_pull=True)
-        Connector('TrainAgent').sync_file(f'net_util/logs/train.log', is_pull=True)
-        os.rename('net_util/logs/train.log', f'{folder}/train.log')
+        Connector('TrainAgent').sync_file('net_util/logs/train.log', is_pull=True, timeout=1)
+
+        ## TODO: dispatch the model to tx
+    
+        os.rename('net_util/logs/train.log', f'{folder}/train.log')   
         
         print(f"Iteration {iteration-1}:")
         current_time = time.time()
         print(f"Exp time {exp_time - start_time}; Sync time {exp_sync_time - exp_time}; Train Time: {train_time - exp_sync_time}; Model Pull Time: {current_time - train_time}")
         print(f"Iteration {iteration-1} Execution time:", current_time - start_time)
+        
+        # if iteration == 1500:
+        #     exit()
+        
         
         
 def evaluate(args, conn, tx_srcs, flows, duration, exp_name):
@@ -193,6 +212,7 @@ def main():
     duration = args.duration
     exp_name = args.exp_name
 
+        
     tx_srcs, flows = create_transmission_config(exp_name, conn, is_update=True)
     
     if args.evaluate:

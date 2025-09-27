@@ -151,8 +151,8 @@ def build_rollout_buffer_from_traces_flat(
             obs_t = th.tensor(_as_1d_float(states[t]),  dtype=th.float32, device=device).unsqueeze(0)
             # Prefer action from network_output (if you recorded it there), else use `actions`
             act_vec = _extract(network_output[t], ["action"], default=None)
-            if act_vec is None:
-                act_vec = _as_1d_float(actions[t])
+            # if act_vec is None:
+            #     act_vec = _as_1d_float(actions[t])
             act_t = th.tensor(act_vec, dtype=th.float32, device=device).unsqueeze(0)
 
             r_arr = _as_1d_float(rewards[t])

@@ -2,11 +2,15 @@ import torch as th
 import torch.nn as nn
 
 class Network(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 64, init_log_std: float = 0.0):
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128, init_log_std: float = 0.0):
         super().__init__()
         self.backbone = nn.Sequential(
-            nn.Linear(obs_dim, hidden), nn.Tanh(),
-            nn.Linear(hidden, hidden), nn.Tanh()
+            nn.Linear(obs_dim, hidden), 
+            nn.LayerNorm(hidden), 
+            nn.GELU(),
+            nn.Linear(hidden, hidden), 
+            nn.LayerNorm(hidden), 
+            nn.GELU(),
         )
         self.action_mean = nn.Linear(hidden, act_dim)
         self.value_head = nn.Linear(hidden, 1)

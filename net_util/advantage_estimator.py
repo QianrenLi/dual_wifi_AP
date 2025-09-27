@@ -31,7 +31,7 @@ def td0(
     T, N = rewards.shape
     adv = th.zeros_like(rewards)
     ret = th.zeros_like(rewards)
-    for t in range(T):
+    for t in reversed(range(T)):
         nonterminal = 1.0 - dones[t]
         next_v = last_value if t == T - 1 else values[t + 1]
         td_target = rewards[t] + gamma * next_v * nonterminal

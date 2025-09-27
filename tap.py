@@ -127,11 +127,10 @@ def _send_file(sock:socket.socket, name:str, file_glob:str) -> None:
     _send(sock, '') #finalize sending
     pass
 
-def _recv_file(sock: socket.socket, file_glob: str) -> None:
+def _recv_file(sock: socket.socket, file_glob: str, timeout: float = None) -> bool:
     prev_timeout = sock.gettimeout()
     try:
-        # Block during file transfer; rely on the explicit terminators ('@end' and '')
-        sock.settimeout(None)
+        sock.settimeout(timeout)  # Set a timeout for the socket to avoid blocking indefinitely
 
         while True:
             # (1) recv file name (length-prefixed); empty string ends the batch
@@ -152,9 +151,16 @@ def _recv_file(sock: socket.socket, file_glob: str) -> None:
                 Path(file_name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(fd.name, file_name)
                 print(f'"{file_name}" received.')
+
+        return True  # Indicate success
+    except socket.timeout:
+        print("Timeout occurred while receiving file.")
+    except Exception as e:
+        print(f"Error occurred during file reception: {e}")
     finally:
-        # CRITICAL: restore whatever the socket had before
         sock.settimeout(prev_timeout)
+    
+    return False  # Indicate failure
 
 
 def _extract(cmd:str, format:str):
@@ -465,7 +471,9 @@ class Handler:
 
             # 3) Receive the files
             if is_pull:
-                _recv_file(conn, file_glob)
+                is_succ = _recv_file(conn, file_glob, timeout=p_args.get('timeout', None))
+                if not is_succ:
+                    return {'res': True}
             else:
                 _send_file(conn, name, file_glob)
                 
@@ -819,9 +827,9 @@ class Connector(Handler):
         """
         return self.handle('sync_code', {'basename':basename})
     
-    def sync_file(self, file_glob, is_pull:bool=True):
+    def sync_file(self, file_glob, is_pull:bool=True, timeout = None):
         """Pull explicit files from the connected client to the server using a glob pattern."""
-        return self.handle('sync_file', {'file_glob': file_glob, 'is_pull': is_pull})
+        return self.handle('sync_file', {'file_glob': file_glob, 'is_pull': is_pull, 'timeout': timeout})
 
 
     def execute(self, function:str, parameters:dict={}, timeout:float=-1) -> str:
