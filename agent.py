@@ -288,6 +288,9 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
             policy_load_path = None
         else:
             policy_load_path = policy_cp_path / f"{max(ids)}.pt"
+    else:
+        policy_load_path = policy_cp_path / policy_load_path
+        
     if policy_load_path:
         print(f"PPO Load {policy_load_path}")
         policy.load(policy_load_path, device=policy_cfg['device'])
