@@ -72,26 +72,22 @@ def _apply_rule(value: Any, rule: Rule, args: Optional[dict] = None) -> Any:
     if isinstance(rule, Mapping):
         # Interpret this as a nested descriptor. Only makes sense if value is a dict.
         if isinstance(value, dict):
-            return trace_filter(value, rule)  # type: ignore[arg-type]
+            return _trace_filter(value, rule)  # type: ignore[arg-type]
         # If value isn't a dict, nothing to do
         return None
 
     # Unknown rule type → keep conservative and drop
     return None
 
-def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]]) -> Any:
+def _trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]]) -> Any:
     """Filter an arbitrarily nested dict 'trace' using 'descriptor' rules.
-       Only 'rule' is honored; 'pos' is ignored.
-       If descriptor is None, return trace unchanged.
-       Returns a filtered dict (possibly empty) or a transformed value.
-    """
+       This version also handles copying entries based on the 'copied' field."""
     if descriptor is None:
         return trace
     if not isinstance(trace, dict):
         return trace
 
     # Normalize descriptor into key -> rule mapping (strip 'pos')
-    # Allow passing a raw nested rule-mapping (when recursing)
     normalized: Dict[str, Rule] = {}
     args_map: Dict[str, Dict[str, Any]] = {}
     for k, v in descriptor.items():
@@ -100,7 +96,6 @@ def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]
             if isinstance(v.get("args"), Mapping):
                 args_map[k] = dict(v["args"])
         else:
-            # If caller passed a raw mapping of key->RuleType (nested case), accept it directly
             normalized[k] = v  # type: ignore[assignment]
 
     filtered: Dict[str, Any] = {}
@@ -119,13 +114,64 @@ def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]
         if key in normalized:
             continue  # already handled
         if isinstance(v, dict):
-            child = trace_filter(v, descriptor)  # keep using the same normalized rules
+            child = _trace_filter(v, descriptor)  # keep using the same normalized rules
             if isinstance(child, dict) and len(child) > 0:
                 filtered[key] = child
-
-    # Ensure that only the top-level keys are sorted by descriptor, but secondary keys remain in original order
+                
     return sort_top_level_keys(filtered, descriptor)
 
+
+def copy_new_dict(filtered: Dict[str, Any], descriptor: Optional[Descriptor | Mapping[str, Any]]) -> Dict[str, Any]:
+    """Create a new dictionary where copied fields (specified in the descriptor) are moved to the top level."""
+    
+    # A new dictionary to store the result, including copied entries at the top level
+    copied_entries = {}
+
+    def copy_recursive(trace: Dict[str, Any], parent_key: Optional[str] = None, is_root = False) -> None:
+        """Recursively check for copied fields and move them to the top level, preserving the parent key."""
+        for key, value in trace.items():
+            # If the key has a "copied" field in the descriptor, copy the data to the top level
+            if key in descriptor and "copied" in descriptor[key]:
+                copied_key = descriptor[key]["copied"]
+                
+                # Initialize the copied entry if it doesn't exist
+                if copied_key not in copied_entries:
+                    copied_entries[copied_key] = {}
+
+                # If we have a parent_key (e.g., '6203@128'), include it in the copied structure
+                if parent_key:
+                    if copied_key not in copied_entries:
+                        copied_entries[copied_key] = {}
+                    if parent_key not in copied_entries[copied_key]:
+                        copied_entries[copied_key][parent_key] = {}
+
+                    # Add the key-value pair under the parent_key in the copied structure
+                    copied_entries[copied_key][parent_key][key] = value
+                else:
+                    # For the top-level items, just copy them as is
+                    copied_entries[copied_key][key] = value
+
+            # If the value is a nested dictionary, recurse into it
+            if isinstance(value, dict):
+                if not is_root:
+                    copy_recursive(value, parent_key or key)
+                else:
+                    copy_recursive(value)
+
+    # Call the recursive function to handle nested structures and copy fields
+    copy_recursive(filtered, is_root=True)
+
+    # Now merge the copied_entries with the filtered dictionary at the top level
+    result = {**filtered, **copied_entries}
+
+    return result
+
+
+def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]]) -> Any:
+    filtered_trace = _trace_filter(trace, descriptor)
+    copied_trace = copy_new_dict(filtered_trace, descriptor)
+    return copied_trace
+    
 
 def sort_top_level_keys(data: Dict[str, Any], descriptor: Dict[str, Any]) -> Dict[str, Any]:
     """Sort the top-level keys according to descriptor order.
@@ -153,6 +199,7 @@ def sort_top_level_keys(data: Dict[str, Any], descriptor: Dict[str, Any]) -> Dic
 
         return sorted_data
     return data
+
 
 # ---------- Main function ----------
 def trace_collec(
@@ -207,11 +254,21 @@ if __name__ == "__main__":
         "queues": {
             "rule": "queues_only_ac1",
             "pos": "agent",
+            "copied": 'rnn',
+        },
+        "rtt": {
+            "rule": True,
+            "pos": "flow",
+            "copied": 'rnn',
+        },
+        "outage_rate": {
+            "rule": True,
+            "pos": "flow",
         },
     }
     
     example_js_str = '''
-    {'flow_stat': {'6203@128': {'rtt': 0.0, 'outage_rate': 0.0, 'throughput': 0.0, 'throttle': 0.0, 'version': 0, 'bitrate': 2000000, 'app_buff': 0, 'frame_count': 0}}, 'device_stat': {'taken_at': {'secs_since_epoch': 1758433731, 'nanos_since_epoch': 703233756}, 'queues': {'192.168.3.61': {'0': 0, '2': 0}, '192.168.3.25': {'0': 0, '1': 3, '2': 0}}, 'link': {'192.168.3.25': {'bssid': '82:19:55:0e:6f:4e', 'ssid': 'HUAWEI-Dual-AP', 'freq_mhz': 2462, 'signal_dbm': -56, 'tx_mbit_s': 174.0}, '192.168.3.25': {'bssid': '82:19:55:0e:6f:52', 'ssid': 'HUAWEI-Dual-AP_5G', 'freq_mhz': 5745, 'tx_mbit_s': 867.0, 'signal_dbm': -48}}}}
+    {'flow_stat': {'6203@128': {'rtt': 0.0, 'outage_rate': 0.0, 'throughput': 0.0, 'throttle': 0.0, 'version': 0, 'bitrate': 2000000, 'app_buff': 0, 'frame_count': 0}}, 'device_stat': {'taken_at': {'secs_since_epoch': 1758433731, 'nanos_since_epoch': 703233756}, 'queues': {'192.168.3.61': {'0': 0, '2': 0}, '192.168.3.25': {'0': 0, '1': 3, '2': 0}}, 'link': {'192.168.3.25': {'bssid': '82:19:55:0e:6f:4e', 'ssid': 'HUAWEI-Dual-AP', 'freq_mhz': 2462, 'signal_dbm': -56, 'tx_mbit_s': 174.0}, '192.168.3.61': {'bssid': '82:19:55:0e:6f:52', 'ssid': 'HUAWEI-Dual-AP_5G', 'freq_mhz': 5745, 'tx_mbit_s': 867.0, 'signal_dbm': -48}}}}
     '''
 
     example_js = trace_filter(json.loads(example_js_str.replace("'", '"')), STATE_DESCRIPTOR)
