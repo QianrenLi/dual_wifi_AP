@@ -105,16 +105,16 @@ def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]
 
     filtered: Dict[str, Any] = {}
 
-    # First pass: direct hits
-    for key, rule in normalized.items():
-        if key in trace:
+    # First pass: direct hits based on the order of the keys in descriptor
+    for key in descriptor.keys():  # Ensure the keys are ordered as in descriptor
+        if key in normalized and key in trace:
             v = trace[key]
             entry_args = args_map.get(key)
-            filtered_v = _apply_rule(v, rule, args=entry_args)
+            filtered_v = _apply_rule(v, normalized[key], args=entry_args)
             if filtered_v is not None and (not isinstance(filtered_v, dict) or len(filtered_v) > 0):
                 filtered[key] = filtered_v
 
-    # Second pass: walk into children not directly matched to discover deeper matches
+    # Second pass: walk into secondary keys (nested dictionaries)
     for key, v in trace.items():
         if key in normalized:
             continue  # already handled
@@ -123,7 +123,36 @@ def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]
             if isinstance(child, dict) and len(child) > 0:
                 filtered[key] = child
 
-    return filtered
+    # Ensure that only the top-level keys are sorted by descriptor, but secondary keys remain in original order
+    return sort_top_level_keys(filtered, descriptor)
+
+
+def sort_top_level_keys(data: Dict[str, Any], descriptor: Dict[str, Any]) -> Dict[str, Any]:
+    """Sort the top-level keys according to descriptor order.
+       Secondary keys (nested dictionaries) will not be sorted but are kept as they are.
+    """
+    if isinstance(data, dict):
+        # Sort the top-level keys in the order defined in descriptor, but ensure we retain any non-empty secondary keys
+        sorted_data = {}
+        
+        # First, process all the keys in the descriptor order
+        for key in descriptor.keys():
+            if key in data:
+                sorted_data[key] = data[key]
+        
+        # Now, recursively sort nested dictionaries (secondary keys)
+        for key, value in sorted_data.items():
+            if isinstance(value, dict):
+                sorted_data[key] = sort_top_level_keys(value, descriptor)  # Sort nested keys recursively
+        
+        # Now, handle any secondary keys that aren't in the descriptor at the top level
+        # They should remain in their original order and not be dropped
+        for key, value in data.items():
+            if key not in sorted_data:
+                sorted_data[key] = value
+
+        return sorted_data
+    return data
 
 # ---------- Main function ----------
 def trace_collec(
@@ -182,7 +211,7 @@ if __name__ == "__main__":
     }
     
     example_js_str = '''
-    {'flow_stat': {'6203@128': {'rtt': 0.0, 'outage_rate': 0.0, 'throughput': 0.0, 'throttle': 0.0, 'version': 0, 'bitrate': 2000000, 'app_buff': 0, 'frame_count': 0}}, 'device_stat': {'taken_at': {'secs_since_epoch': 1758433731, 'nanos_since_epoch': 703233756}, 'queues': {'192.168.3.61': {'0': 0, '2': 0}, '192.168.3.25': {'0': 0, '1': 3, '2': 0}}, 'link': {'192.168.3.25': {'bssid': '82:19:55:0e:6f:4e', 'ssid': 'HUAWEI-Dual-AP', 'freq_mhz': 2462, 'signal_dbm': -56, 'tx_mbit_s': 174.0}, '192.168.3.61': {'bssid': '82:19:55:0e:6f:52', 'ssid': 'HUAWEI-Dual-AP_5G', 'freq_mhz': 5745, 'signal_dbm': -48, 'tx_mbit_s': 867.0}}}}
+    {'flow_stat': {'6203@128': {'rtt': 0.0, 'outage_rate': 0.0, 'throughput': 0.0, 'throttle': 0.0, 'version': 0, 'bitrate': 2000000, 'app_buff': 0, 'frame_count': 0}}, 'device_stat': {'taken_at': {'secs_since_epoch': 1758433731, 'nanos_since_epoch': 703233756}, 'queues': {'192.168.3.61': {'0': 0, '2': 0}, '192.168.3.25': {'0': 0, '1': 3, '2': 0}}, 'link': {'192.168.3.25': {'bssid': '82:19:55:0e:6f:4e', 'ssid': 'HUAWEI-Dual-AP', 'freq_mhz': 2462, 'signal_dbm': -56, 'tx_mbit_s': 174.0}, '192.168.3.25': {'bssid': '82:19:55:0e:6f:52', 'ssid': 'HUAWEI-Dual-AP_5G', 'freq_mhz': 5745, 'tx_mbit_s': 867.0, 'signal_dbm': -48}}}}
     '''
 
     example_js = trace_filter(json.loads(example_js_str.replace("'", '"')), STATE_DESCRIPTOR)
