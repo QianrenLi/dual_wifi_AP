@@ -1,24 +1,29 @@
 import importlib.util
-from pathlib import Path
 import sys
 import os
 import json
 
-from util.flows import reshape_to_flows_by_port
+from pathlib import Path
+from typing import Dict, Tuple
+
+from util.flows import reshape_to_flows_by_port, Flow
 
 current = os.path.dirname(os.path.realpath(__file__))
 parent = os.path.dirname(current)
 sys.path.append(parent)
 from tap import Connector
 
+TxSrcs = Dict[str, Dict[str, str]]        # tx -> {"control_config": "...", "transmission_config": "..."}
+Flows = Dict[int, Flow]                   # port -> Flow
+
 def load_config_file(config_name):
-    config_path = Path("config") / f"{config_name}.py"
+    config_path = Path(config_name)
     spec = importlib.util.spec_from_file_location("exp_config", config_path)
     cfg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cfg)
     return cfg
 
-def create_transmission_config(config_name, conn: Connector, is_update=False):
+def create_transmission_config(config_name, exp_name, conn: Connector, is_update=False) -> Tuple[TxSrcs, Flows, TxSrcs, Flows]:
     cfg = load_config_file(config_name)
     clients = Connector().list_all()
     for client in clients:
@@ -35,9 +40,9 @@ def create_transmission_config(config_name, conn: Connector, is_update=False):
     
     tx_srcs = {}
     
-    tx_folder = f"stream-replay/data/configs/{config_name}"
+    tx_folder = f"stream-replay/data/configs/{exp_name}"
     os.makedirs(tx_folder, exist_ok=True)
-    network_folder = f"net_util/net_config/{config_name}"
+    network_folder = f"net_util/net_config/{exp_name}"
     os.makedirs(network_folder, exist_ok=True)
     
     for src, config in configs.items():

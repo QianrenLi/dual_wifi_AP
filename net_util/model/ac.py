@@ -12,7 +12,10 @@ class Network(nn.Module):
             nn.LayerNorm(hidden), 
             nn.GELU(),
         )
-        self.action_mean = nn.Linear(hidden, act_dim)
+        self.action_mean = nn.Sequential(
+            nn.Linear(hidden, act_dim),
+            nn.ReLU(),
+        )
         self.value_head = nn.Linear(hidden, 1)
         # Global (state-independent) log std per action dim
         self.log_std = nn.Parameter(th.ones(act_dim) * init_log_std)
