@@ -109,7 +109,7 @@ def _send_file(sock:socket.socket, name:str, file_glob:str) -> None:
     ##
     for _file in file_list:
         file_name = _file.relative_to( Path('.').resolve() ).as_posix()
-        print(f'Send to {name}: "{file_name}" ... ', end='', flush=True)
+        # print(f'Send to {name}: "{file_name}" ... ', end='', flush=True)
         with open(_file, 'rb') as fd:
             fd.seek(0, os.SEEK_END)
             file_len = fd.tell()
@@ -123,7 +123,7 @@ def _send_file(sock:socket.socket, name:str, file_glob:str) -> None:
             ## (3) send remains
             _send(sock, fd.read())
             _send(sock, '@end') #finalize file sending
-        print('done.')
+        # print('done.')
     _send(sock, '') #finalize sending
     pass
 
@@ -150,7 +150,7 @@ def _recv_file(sock: socket.socket, file_glob: str, timeout: float = None) -> bo
                 # (3) write out to destination path
                 Path(file_name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(fd.name, file_name)
-                print(f'"{file_name}" received.')
+                # print(f'"{file_name}" received.')
 
         return True  # Indicate success
     except socket.timeout:
@@ -187,9 +187,9 @@ def _execute(name, task_pool, tid, config, params, timeout) -> None:
                 commands[i] = commands[i].replace(f'${k}', str(v))
         ##
         processes = [ SHELL_POPEN(cmd) for cmd in commands ]
-        print(commands)
+        # print(commands)
         returns = [ proc.poll() for proc in processes ]
-        print(returns)
+        # print(returns)
         _now = time.time()
         while None in returns and time.time() - _now < timeout:
             returns = [ proc.poll() for proc in processes ]
@@ -787,7 +787,11 @@ class Connector(Handler):
         port = port if port else IPC_PORT
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.connect((addr, port))
+        # self.sock = socket.create_connection((addr, port), timeout=5.0)
+        # self.sock.settimeout(5.0)  # avoid infinite wait on dead peers
+        # self._enable_keepalive(self.sock)
         pass
+    
 
     def list_all(self) -> dict:
         """List all online clients."""

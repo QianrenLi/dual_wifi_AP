@@ -4,6 +4,7 @@ config/*
 net_util/net_config/*
 net_util/net_cp/*
 
+exp_trace/*.png
 
 __pycache__/
 logs/

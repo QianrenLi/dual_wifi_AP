@@ -202,7 +202,11 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
                 control_cmd:ControlCmd = revive_jsonlike(cfg.default_cmd)
                 res = None
             else:
-                res, control_cmd = policy.act(obs_for_policy, is_eval)
+                try:
+                    res, control_cmd = policy.act(obs_for_policy, is_eval)
+                except:
+                    time.sleep(1)
+                    continue
             # Build ControlCmd using canonical mapping (pads/trims internally)
             control_body: Dict[str, ControlCmd] = {}
             ## TODO: handle multi-link control

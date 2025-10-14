@@ -16,14 +16,70 @@ TxSrcs = Dict[str, Dict[str, str]]        # tx -> {"control_config": "...", "tra
 Flows = Dict[int, Flow]                   # port -> Flow
 
 # ---------- Low-level utilities ----------
-def apply_until_done(conn: Connector, pause_s: float = 1.0):
-    """Flush the executor and keep applying until it succeeds."""
+import random
+from typing import Tuple, Type
+
+def apply_until_done(
+    conn: "Connector",
+    pause_s: float = 1.0,
+    *,
+    timeout_s: float | None = None,
+    retry_exceptions: Tuple[Type[Exception], ...] = (Exception,),
+    backoff: float = 1.0,      # 1.0 = constant delay; >1.0 = exponential backoff
+    jitter_s: float = 0.0,     # add up to ±jitter_s/2 random jitter to sleep
+) -> any:
+    """
+    Flush the executor and keep applying until it succeeds, or until timeout.
+
+    Args:
+        conn: Connector instance.
+        pause_s: Base pause between retries (seconds).
+        timeout_s: Maximum total time to keep retrying (seconds). None = no timeout.
+        retry_exceptions: Which exceptions should trigger a retry.
+        backoff: Multiplier for exponential backoff (1.0 to disable).
+        jitter_s: Uniform jitter range added to sleep (0 to disable).
+
+    Returns:
+        Whatever `conn.apply()` returns on success.
+
+    Raises:
+        TimeoutError: If `timeout_s` elapses without success.
+        Any non-retry exception from `conn.apply()` is raised immediately.
+    """
+    start = time.monotonic()
     conn.executor.fetch()
+    attempt = 0
+
     while True:
+        attempt += 1
         try:
             return conn.apply()
-        except Exception:
-            time.sleep(pause_s)
+        except retry_exceptions as e:
+            # Non-infinite timeout check
+            if timeout_s is not None:
+                elapsed = time.monotonic() - start
+                if elapsed >= timeout_s:
+                    raise TimeoutError(
+                        f"apply_until_done timed out after {elapsed:.2f}s "
+                        f"and {attempt} attempt(s)."
+                    ) from e
+
+            # Compute sleep with optional backoff and jitter
+            sleep_s = pause_s * (backoff ** (attempt - 1))
+            if jitter_s > 0:
+                sleep_s += random.uniform(-jitter_s / 2, jitter_s / 2)
+
+            # Don't oversleep past the deadline
+            if timeout_s is not None:
+                remaining = timeout_s - (time.monotonic() - start)
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"apply_until_done timed out after {timeout_s:.2f}s "
+                        f"and {attempt} attempt(s)."
+                    ) from e
+                sleep_s = max(0.0, min(sleep_s, remaining))
+
+            time.sleep(sleep_s)
 
 
 def rel_config_path(path_str: str) -> str:
@@ -51,7 +107,7 @@ def clean_first_iteration(exp_name: str):
 def schedule_receive(conn: Connector, flow: Flow, port: int, duration: int, render: bool, wait: float = 0.0):
     """Queue the appropriate receive command for one flow."""
     needs_file = "file" in flow.npy_file
-    base_args = {"duration": duration, "port": port, "hyper_parameters":""} #[Warning]: it seems the tap have certain memory so the hyper parameter should modified each time
+    base_args = {"duration": duration, "port": port, "timeout": duration + 20, "hyper_parameters":""} #[Warning]: it seems the tap have certain memory so the hyper parameter should modified each time
     if needs_file:
         conn.batch(flow.dst_sta, "receive_file", base_args).wait(wait)
         return
@@ -70,7 +126,7 @@ def schedule_send(conn: Connector, tx_srcs: TxSrcs, duration: int, *, cmd: str):
     """Queue send commands for a set of tx sources."""
     for tx, srcs in tx_srcs.items():
         cfg_rel = rel_config_path(srcs["transmission_config"])
-        conn.batch(tx, cmd, {"duration": duration, "config": cfg_rel})
+        conn.batch(tx, cmd, {"duration": duration, "config": cfg_rel, "timeout": duration + 20})
 
 
 def pull_rtt_logs(folder: Path, tx_flows: Flows, log_dir: Path = Path("stream-replay/logs")):
@@ -177,7 +233,14 @@ def run_iteration(
     run_tx_and_interference(conn, tx_srcs, inter_srcs, duration)
 
     # 3) run remote work
-    res = apply_until_done(conn)
+    try:
+        res = apply_until_done(conn, pause_s=0.5, timeout_s=duration+30, backoff=1.5, jitter_s=0.2)
+    except KeyboardInterrupt:
+        exit()
+    except:
+        print("fail and retry")
+        return iteration
+    
     res = [r for r in res if r]  # drop {}
     exp_t = time.time()
 
@@ -188,7 +251,7 @@ def run_iteration(
     
     # 5) training (only in train mode)
     if not args.evaluate:
-        push_rollout_to_trainer(folder)
+        push_rollout_to_trainer(folder) 
         sync_t = time.time()
         
         traces.append(folder / "rollout.jsonl")
@@ -232,8 +295,10 @@ def train_loop(
         return (iteration // args.per_exp_trials) % len(paths)
         
     traces: List[Path] = []
-    max_traces = 5
-    iteration = 117
+    max_traces = 1
+    iteration = 3013
+    last_iteration = iteration
+    
     
     path = paths[ path_id(iteration) ]
     print(f"Train config {path}")
@@ -252,6 +317,14 @@ def train_loop(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
             duration, exp_name, iteration, traces, max_traces
         )
+        
+        if last_iteration == iteration:
+            path = paths[ path_id(iteration) ]
+            print(f"Train config {path}")
+            tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
+            continue
+        
+        last_iteration = iteration
 
 
 def evaluate(
