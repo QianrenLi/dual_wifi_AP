@@ -45,18 +45,12 @@ class PolicyBase:
     
     
     def save(self, path: str):
-        th.save({
-            "model": self.net.state_dict(),
-            "optimizer": self.opt.state_dict(),
-        }, path)
+        raise NotImplementedError
+
         
     def load(self, path: str, device:str):
-        ckpt = th.load(path, map_location=device)
+        raise NotImplementedError
 
-        self.net.load_state_dict(ckpt["model"])
-        self.opt.load_state_dict(ckpt["optimizer"])
-
-        self.net.to(device)
 
         
     

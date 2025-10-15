@@ -7,6 +7,8 @@ import pkgutil
 POLICY_REGISTRY = {}
 POLICY_CFG_REGISTRY = {}
 
+BUFFER_REGISTRY = {}
+
 def register_policy(cls):
     """Decorator to register policy classes by name."""
     POLICY_REGISTRY[cls.__name__] = cls
@@ -15,6 +17,10 @@ def register_policy(cls):
 def register_policy_cfg(cls):
     """Decorator to register policy classes by name."""
     POLICY_CFG_REGISTRY[cls.__name__.split('_')[0]] = cls
+    return cls
+
+def register_buffer(cls):
+    BUFFER_REGISTRY[cls.__name__] = cls
     return cls
 
 

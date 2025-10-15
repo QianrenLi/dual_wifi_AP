@@ -2,7 +2,7 @@ import json
 import os
 import argparse
 from pathlib import Path
-from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY
+from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY, BUFFER_REGISTRY
 from typing import Any, Dict, List, Optional, Tuple, get_args, get_origin, Union
 from dataclasses import dataclass, MISSING, fields, is_dataclass
 from net_util.base import PolicyBase
@@ -60,32 +60,6 @@ def _inflate_dataclass_from_manifest(cls, manifest: Dict[str, Any]) -> Any:
     return cls(**values)
 
 
-import numpy as np
-import torch as th
-
-def _as_1d_float(x):
-    """Coerce to 1-D float np.array without re-flattening dicts."""
-    if isinstance(x, th.Tensor):
-        x = x.detach().cpu().numpy()
-    a = np.asarray(x, dtype=np.float32)
-    return a.reshape(-1)
-
-def _extract(netout_step, keys, default=None):
-    if not isinstance(netout_step, dict):
-        return default
-    for k in keys:
-        if k in netout_step:
-            return netout_step[k]
-    return default
-
-def _sum_logp(x):
-    if x is None:
-        return 0.0
-    if isinstance(x, th.Tensor):
-        x = x.detach().cpu().numpy()
-    return float(np.asarray(x, dtype=np.float32).sum())
-
-
 def _normalize_trace_paths(raw_paths):
     # raw_paths is a list (because nargs='+'); each item may itself be "a,b,c"
     paths = []
@@ -99,94 +73,6 @@ def _normalize_trace_paths(raw_paths):
             seen.add(p)
             uniq.append(p)
     return uniq
-
-
-
-def build_rollout_buffer_from_traces_flat(
-    traces,                                # list of (states, actions, rewards, network_output)
-    device="cuda",
-    advantage_estimator="gae",
-    gamma: float = 0.99,
-    lam: float = 0.95,
-    reward_agg="sum",  # "sum" | "mean" | callable(np.ndarray)->float
-):
-    """
-    Concatenate multiple flat traces into ONE RolloutBuffer.
-    Each element of `traces` is (states, actions, rewards, network_output),
-    where states[t], actions[t], rewards[t] are already 1-D float lists (or array-likes),
-    and network_output[t] may contain 'log_prob', 'value', optional 'done' and 'next_value'.
-    We force an episode boundary at the end of each trace if 'done' is missing there.
-    """
-    import numpy as np
-    # Reward aggregator
-    if reward_agg == "sum":
-        agg = lambda arr: float(np.asarray(arr, dtype=np.float32).sum())
-    elif reward_agg == "mean":
-        agg = lambda arr: float(np.asarray(arr, dtype=np.float32).mean())
-    elif callable(reward_agg):
-        agg = lambda arr: float(reward_agg(np.asarray(arr, dtype=np.float32)))
-    else:
-        raise ValueError("reward_agg must be 'sum', 'mean', or callable")
-
-    # Basic dims from first timestep of first trace
-    assert len(traces) >= 1, "No traces provided."
-    first_states, first_actions, _, _ = traces[0]
-    obs_dim = _as_1d_float(first_states[0]).size
-    act_dim = _as_1d_float(first_actions[0]).size
-
-    # Total steps
-    total_T = sum(len(s) for (s, a, r, n) in traces)
-
-    buf = RolloutBuffer.create(buffer_size=total_T, obs_dim=obs_dim, act_dim=act_dim, n_envs=1, device=device)
-    buf.advantage_estimator = advantage_estimator
-
-    # Fill buffer
-    step_idx = 0
-    last_value_for_bootstrap = 0.0  # fallback if nothing present
-    for (states, actions, rewards, network_output) in traces:
-        T = len(states)
-        assert len(actions) == T and len(rewards) == T and len(network_output) == T, "Trace lengths must match."
-
-        for t in range(T):
-            obs_t = th.tensor(_as_1d_float(states[t]),  dtype=th.float32, device=device).unsqueeze(0)
-            # Prefer action from network_output (if you recorded it there), else use `actions`
-            act_vec = _extract(network_output[t], ["action"], default=None)
-            # if act_vec is None:
-            #     act_vec = _as_1d_float(actions[t])
-            act_t = th.tensor(act_vec, dtype=th.float32, device=device).unsqueeze(0)
-
-            r_arr = _as_1d_float(rewards[t])
-            rew_t = th.tensor([agg(r_arr)], dtype=th.float32, device=device)
-
-            logp_vec = _extract(network_output[t], ["log_prob", "logp", "logprob", "log_probs"], default=None)
-            logp_t  = th.tensor([_sum_logp(logp_vec)], dtype=th.float32, device=device)
-
-            val_t   = _extract(network_output[t], ["value", "v"], default=0.0)
-            val_t   = th.tensor([float(val_t)], dtype=th.float32, device=device)
-
-            # Done handling: respect recorded 'done'; if missing, force done=True at the final step of this trace
-            recorded_done = _extract(network_output[t], ["done", "terminal", "is_done"], default=None)
-            if recorded_done is None:
-                done_flag = (t == T - 1)
-            else:
-                done_flag = bool(recorded_done)
-                # if the trace doesn't mark last step as done, still keep what recorder says (you may override here if desired)
-                if t == T - 1 and recorded_done is None:
-                    done_flag = True
-            done_t  = th.tensor([1.0 if done_flag else 0.0], dtype=th.float32, device=device)
-
-            buf.add(obs=obs_t, action=act_t, log_prob=logp_t, reward=rew_t, done=done_t, value=val_t)
-            step_idx += 1
-
-        # Track bootstrap candidate value for this trace (priority: explicit next/bootstrap → last value)
-        last_val = _extract(network_output[-1], ["next_value", "bootstrap_value", "value", "v"], default=0.0)
-        last_value_for_bootstrap = float(last_val)
-
-    # Use the last seen bootstrap candidate
-    last_val_t = th.tensor([last_value_for_bootstrap], dtype=th.float32, device=device)
-    buf.compute_advantages(last_value=last_val_t, normalize=True, gamma=gamma, lam=lam)
-    return buf
-
 
 def main():
     p = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
@@ -206,6 +92,7 @@ def main():
     policy_cls = POLICY_REGISTRY[policy_name]
 
     rollout_cfg = control_config['rollout_cfg']
+    Buffer = BUFFER_REGISTRY[rollout_cfg['buffer_name']]
 
     # ---- load & flatten multiple traces
     merged_traces = []
@@ -221,12 +108,12 @@ def main():
         r = [flatten_leaves(x) for x in r]
         merged_traces.append((s, a, r, net))
 
-    rollout_buffer = build_rollout_buffer_from_traces_flat(
+    rollout_buffer = Buffer.build_from_traces(
         merged_traces,
         device="cuda",
-        advantage_estimator=rollout_cfg["advantage_estimator"],
-        gamma=rollout_cfg["gamma"],
-        lam=rollout_cfg["lam"],
+        advantage_estimator=rollout_cfg.get("advantage_estimator", None),
+        gamma=rollout_cfg.get("gamma", None),
+        lam=rollout_cfg.get("lam", None),
         reward_agg=rollout_cfg.get("reward_agg", "sum"),
     )
 
@@ -248,4 +135,20 @@ def main():
     
 
 if __name__ == "__main__":
+    import importlib.util
+    config_path = Path('/home/qianren/workspace/dual_wifi_AP/config/rtt_only.py')
+    spec = importlib.util.spec_from_file_location("exp_config", config_path)
+    cfg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cfg)
+    policy_configs =cfg.policy_config()
+    
+    network_folder = f"net_util/net_config/test"
+    os.makedirs(network_folder, exist_ok=True)
+    
+    for src, config in policy_configs.items():
+        for des, net_config in config.items():
+            data_path = f"{network_folder}/test.json"
+            with open(data_path, "w") as f:
+                f.write(json.dumps(net_config, indent=4))
+                
     main()
