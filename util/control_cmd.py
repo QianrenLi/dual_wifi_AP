@@ -63,11 +63,7 @@ class CListFloat:
         lo, hi = self.value_range
         clipped = []
         for v in values:
-            if lo is not None and v < lo:
-                v = lo
-            if hi is not None and v > hi:
-                v = hi
-            clipped.append(v)
+            clipped.append(v * (hi - lo) / 2 + (hi + lo) / 2)
         self.values = clipped
 
     def to_jsonable(self):
@@ -85,7 +81,10 @@ class CInt:
     def __init__(self, value: int):
         if isinstance(value, list):
             value = value[0]
-        value = int(value * (self.value_range[1] - self.value_range[0]))
+            
+        lo, hi = self.value_range
+        value = int(value * (hi - lo) / 2 + (hi + lo) / 2)
+        
         lo, hi = self.value_range
         if lo is not None and value < lo:
             value = lo
@@ -104,9 +103,9 @@ class CInt:
         return f"{self.__class__.__name__}({self.value})"
     
 @register_jo()
-class C_LIST_FLOAT_DIM4_RANGE_POSITIVE(CListFloat):
+class C_LIST_FLOAT_DIM4_0_500(CListFloat):
     dim = 4
-    value_range = (0.0, np.inf)
+    value_range = (0.0, 500)
 
 @register_jo()
 class C_INT_RANGE_0_13(CInt):
@@ -116,7 +115,7 @@ class C_INT_RANGE_0_13(CInt):
 @register_jo()
 @dataclass
 class ControlCmd:
-    policy_parameters: C_LIST_FLOAT_DIM4_RANGE_POSITIVE
+    policy_parameters: C_LIST_FLOAT_DIM4_0_500
     version: C_INT_RANGE_0_13
     
     @staticmethod
