@@ -9,6 +9,7 @@ import importlib
 from net_util.base import PolicyBase
 from net_util.replay import ReplayBuffer  # <-- imported, not implemented here
 from . import register_policy, register_policy_cfg
+from torch.utils.tensorboard import SummaryWriter
 
 
 def _safe_mean(xs):
@@ -137,83 +138,113 @@ class SAC(PolicyBase):
         }
 
     # ---- Training loop (mirrors PPO.train_per_epoch format) ----
-    def train_per_epoch(self, log_path: str = "net_util/logs/train.log"):
-        with open(log_path, "w") as f:
-            for epoch in range(self.cfg.n_updates):
-                if getattr(self.buf, "ptr") < max(self.cfg.learning_starts, self.cfg.batch_size):
-                    f.write(f"[epoch {epoch+1:03d}/{self.cfg.n_updates:03d}] waiting_for_data size={self.buf.ptr}\n")
-                    f.flush()
-                    continue
+    def train_per_epoch(self, epoch, log_dir: str = "runs/sac", writer: Optional[SummaryWriter] = None):
+        """
+        Train for one epoch and record metrics to TensorBoard.
+        Returns a single float: L2 norm of actor parameter change (delta_actor).
+        """
+        # Lazily create a writer if one isn't provided
+        _local_writer = False
+        if writer is None:
+            writer = SummaryWriter(log_dir=log_dir)
+            _local_writer = True
 
-                ent_losses, ent_vals = [], []
-                actor_losses, critic_losses = [], []
-                q1_vals = []
+        # Global step for TB (persist across calls)
+        self._global_step = getattr(self, "_global_step", 0)
 
-                for obs, act, rew, nxt, done in self.buf.get_minibatches(self.cfg.batch_size):
-                    # alpha
-                    if self.alpha_opt is not None and self.log_alpha is not None:
-                        with th.no_grad():
-                            a_pi, logp_pi, _ = self.net.act(obs)
-                        alpha = self.log_alpha.exp().detach()
-                        ent_loss = -(self.log_alpha * (logp_pi + self.target_entropy).detach()).mean()
-                        self.alpha_opt.zero_grad(); ent_loss.backward(); self.alpha_opt.step()
-                        ent_losses.append(ent_loss.item()); ent_vals.append(alpha.item())
-                    else:
-                        alpha = self.alpha_tensor
-                        ent_losses.append(float("nan")); ent_vals.append(alpha.item())
+        # Record buffer status even if we're waiting
+        writer.add_scalar("buffer/ptr", getattr(self.buf, "ptr"), epoch)
+        writer.add_scalar("buffer/size", getattr(self.buf, "size", 0), epoch)
 
-                    # critic targets
-                    with th.no_grad():
-                        a_next, logp_next, _ = self.net.act(nxt)
-                        q = self.critic_target(th.cat([nxt, a_next], dim=1))
-                        q_next = q - alpha * logp_next.reshape(-1, 1)
-                        targ = rew + (1.0 - done) * self.cfg.gamma * q_next
+        if getattr(self.buf, "ptr") < max(self.cfg.learning_starts, self.cfg.batch_size):
+            writer.add_text("status", f"waiting_for_data size={self.buf.ptr}", epoch)
+            if _local_writer:
+                writer.flush(); writer.close()
+            return 0.0  # no training; no change
 
-                    # critic update
-                    q1_pred = self.critic(th.cat([obs, act], dim=1) )
-                    c_loss = F.mse_loss(symlog(q1_pred), symlog(targ))
-                    self.critic_opt.zero_grad()
-                    c_loss.backward()
-                    self.critic_opt.step()
+        ent_losses, ent_vals = [], []
+        actor_losses, critic_losses = [], []
+        q1_vals = []
+        log_pi_vals = []
 
-                    # actor update
+        for obs, act, rew, nxt, done in self.buf.get_minibatches(self.cfg.batch_size):
+            # ----- temperature / alpha -----
+            if self.alpha_opt is not None and getattr(self, "log_alpha", None) is not None:
+                with th.no_grad():
                     a_pi, logp_pi, _ = self.net.act(obs)
-                    q_pi = self.critic_target(th.cat([obs, a_pi], dim=1))
-                    a_loss = (alpha * logp_pi - q_pi).mean()
-                    self.actor_opt.zero_grad(); a_loss.backward(); self.actor_opt.step()
+                alpha = self.log_alpha.exp().detach()
+                ent_loss = -(self.log_alpha * (logp_pi + self.target_entropy).detach()).mean()
+                self.alpha_opt.zero_grad(); ent_loss.backward(); self.alpha_opt.step()
+                ent_losses.append(ent_loss.item()); ent_vals.append(alpha.item())
+                writer.add_scalar("loss/entropy_loss_step", ent_loss.item(), self._global_step)
+                writer.add_scalar("sac/alpha_step", alpha.item(), self._global_step)
+            else:
+                alpha = self.alpha_tensor
+                ent_losses.append(float("nan")); ent_vals.append(alpha.item())
+                writer.add_scalar("sac/alpha_step", alpha.item(), self._global_step)
 
-                    # target update
-                    if (self._n_updates % self.cfg.target_update_interval) == 0:
-                        soft_update(self.critic_target, self.critic, self.cfg.tau)
+            # ----- critic targets -----
+            with th.no_grad():
+                a_next, logp_next, _ = self.net.act(nxt)
+                q = self.critic_target(th.cat([nxt, a_next], dim=1))
+                q_next = q - alpha * logp_next.reshape(-1, 1)
+                targ = rew + (1.0 - done) * self.cfg.gamma * q_next
 
-                    self._n_updates += 1
+            # ----- critic update -----
+            q1_pred = self.critic(th.cat([obs, act], dim=1))
+            c_loss = F.mse_loss(symlog(q1_pred), symlog(targ))
+            self.critic_opt.zero_grad()
+            c_loss.backward()
+            self.critic_opt.step()
 
-                    # meters
-                    actor_losses.append(a_loss.item())
-                    critic_losses.append(c_loss.item())
-                    q1_vals.append(q1_pred.mean().item())
+            # ----- actor update -----
+            a_pi, logp_pi, _ = self.net.act(obs)
+            q_pi = self.critic_target(th.cat([obs, a_pi], dim=1))
+            a_loss = (alpha * logp_pi - q_pi).mean()
+            self.actor_opt.zero_grad(); a_loss.backward(); self.actor_opt.step()
 
-                try:
-                    lr = next(iter(self.actor_opt.param_groups))["lr"]
-                except Exception:
-                    lr = float("nan")
+            # ----- target update -----
+            if (self._n_updates % self.cfg.target_update_interval) == 0:
+                (self.soft_update(self.critic_target, self.critic, self.cfg.tau)
+                if hasattr(self, "soft_update") else
+                soft_update(self.critic_target, self.critic, self.cfg.tau))
 
-                msg = (
-                    f"[epoch {epoch+1:03d}/{self.cfg.n_updates:03d}] "
-                    f"buf={self.buf.size:6d}  "
-                    f"n_updates={self._n_updates:7d}  "
-                    f"alpha={_safe_mean(ent_vals):.4f}  "
-                    f"ent_loss={_safe_mean(ent_losses):8.5f}  "
-                    f"actor_loss={_safe_mean(actor_losses):8.5f}  "
-                    f"critic_loss={_safe_mean(critic_losses):8.5f}  "
-                    f"q1={_safe_mean(q1_vals):8.3f}  "
-                    f"lr={lr:.3e}"
-                )
-                f.write(msg + "\n"); f.flush()
-                
-                ## Early stop if alpha = 0
-                if _safe_mean(ent_vals) < 0.0005:
-                    break
+            self._n_updates += 1
+            self._global_step += 1
+
+            # meters
+            actor_losses.append(a_loss.item())
+            critic_losses.append(c_loss.item())
+            q1_vals.append(q1_pred.mean().item())
+            log_pi_vals.append(logp_pi.detach().mean().item())
+
+            # Per-step TensorBoard scalars
+            writer.add_scalar("loss/actor_step", a_loss.item(), self._global_step)
+            writer.add_scalar("loss/critic_step", c_loss.item(), self._global_step)
+            writer.add_scalar("q/q1_mean_step", q1_vals[-1], self._global_step)
+            writer.add_scalar("policy/logp_pi_step", log_pi_vals[-1], self._global_step)
+
+        # LR (per-epoch)
+        try:
+            lr = next(iter(self.actor_opt.param_groups))["lr"]
+        except Exception:
+            lr = float("nan")
+
+        # Per-epoch aggregates
+        writer.add_scalar("loss/actor_epoch", _safe_mean(actor_losses), epoch)
+        writer.add_scalar("loss/critic_epoch", _safe_mean(critic_losses), epoch)
+        writer.add_scalar("loss/entropy_epoch", _safe_mean(ent_losses), epoch)
+        writer.add_scalar("q/q1_mean_epoch", _safe_mean(q1_vals), epoch)
+        writer.add_scalar("policy/logp_pi_epoch", _safe_mean(log_pi_vals), epoch)
+        writer.add_scalar("opt/lr_epoch", lr, epoch)
+
+        # Persist updated global step
+        setattr(self, "_global_step", self._global_step)
+
+        # Close local writer if created here
+        if _local_writer:
+            writer.flush()
+            writer.close()
 
     def save(self, path:str):
         th.save({

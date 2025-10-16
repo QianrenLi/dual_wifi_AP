@@ -162,25 +162,25 @@ def push_rollout_to_trainer(folder: Path):
         Connector("TrainAgent").sync_file(str(target), is_pull=False)
 
 
-def train_once(conn: Connector, control_config: str, traces: Iterable[Path], maybe_load: Path | None = None):
-    args = {"control_config": control_config, "trace_path": " ".join(str(p) for p in traces)}
+def train_forever(conn: Connector, control_config: str, trace: Path, maybe_load: Path | None = None):
+    args = {"control_config": control_config, "trace_path": trace}
     if maybe_load is not None:
         args["load_path"] = str(maybe_load)
-    conn.batch("TrainAgent", "model_train", args)
+    conn.batch("model_train_forever", "model_train", args)
     apply_until_done(conn)
 
 
-def pull_trainer_artifacts(exp_name: str, iteration: int, out_folder: Path):
+def pull_trainer_artifacts(exp_name: str):
     """Pull model and train.log from TrainAgent; keep a copy in trial folder."""
     # model
-    Connector("TrainAgent").sync_file(f"net_util/net_cp/{exp_name}/{iteration}.pt", is_pull=True)
+    Connector("TrainAgent").sync_file(f"net_util/net_cp/{exp_name}/latest.pt", is_pull=True)
     # train log with timeout
-    Connector("TrainAgent").sync_file("net_util/logs/train.log", is_pull=True, timeout=1)
+    # Connector("TrainAgent").sync_file("net_util/logs/train.log", is_pull=True, timeout=1)
 
     # stash in trial folder
-    tl = Path("net_util/logs/train.log")
-    if tl.exists():
-        tl.rename(out_folder / "train.log")
+    # tl = Path("net_util/logs/train.log")
+    # if tl.exists():
+        # tl.rename(out_folder / "train.log")
 
 
 # ---------- High-level routines ----------
@@ -259,12 +259,12 @@ def run_iteration(
             traces.pop(0)
 
         # pick any control_config (all tx share the same key names)
-        any_tx = next(iter(tx_srcs))
-        control_cfg = tx_srcs[any_tx]["control_config"]
+        # any_tx = next(iter(tx_srcs))
+        # control_cfg = tx_srcs[any_tx]["control_config"]
 
-        load_path = Path(f"net_util/net_cp/{exp_name}/{iteration}.pt") if iteration > 0 else None
-        train_once(conn, control_cfg, traces, load_path)
-        train_t = time.time()
+        # load_path = Path(f"net_util/net_cp/{exp_name}/{iteration}.pt") if iteration > 0 else None
+        # 
+        # train_t = time.time()
 
         # 6) pull new model & logs
         next_iter = iteration + 1
@@ -274,8 +274,8 @@ def run_iteration(
         print(f"Iteration {iteration}:")
         print(f"  Exp time   : {exp_t - start_t:.3f}s")
         print(f"  Sync time  : {sync_t - exp_t:.3f}s")
-        print(f"  Train time : {train_t - sync_t:.3f}s")
-        print(f"  Pull time  : {end_t - train_t:.3f}s")
+        # print(f"  Train time : {train_t - sync_t:.3f}s")
+        print(f"  Pull time  : {end_t - sync_t:.3f}s")
         print(f"  Total      : {end_t - start_t:.3f}s")
     print(f"  res        : {res}")
 
@@ -307,6 +307,10 @@ def train_loop(
     if iteration == 0:
         clean_first_iteration(exp_name)
 
+    any_tx = next(iter(tx_srcs))
+    control_cfg = tx_srcs[any_tx]["control_config"]
+    train_forever(conn, control_cfg, f'exp_trace/{exp_name}', None)
+    
     while True:
         if iteration % args.per_exp_trials == 0:
             path = paths[ path_id(iteration) ]

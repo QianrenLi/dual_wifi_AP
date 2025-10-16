@@ -40,7 +40,7 @@ class PolicyBase:
         return flatten_leaves(obs)
     
 
-    def train_per_epoch(self):
+    def train_per_epoch(self, epoch, writer = None):
         raise NotImplementedError
     
     

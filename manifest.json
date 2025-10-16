@@ -201,6 +201,17 @@
             "commands":[
                 "python train_rl.py --control_config $control_config --trace_path $trace_path --load_path $load_path"
             ]
+        },
+        "model_train_forever":{
+            "description": "train the rl model",
+            "parameters":{
+                "control_config": "data/control_config.json",
+                "trace_path": "data",
+                "load_path": "none"
+            },
+            "commands":[
+                "python train_rl.py --control_config $control_config --trace_path $trace_path --load_path $load_path &"
+            ]
         }
     }
 }

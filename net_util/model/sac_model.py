@@ -12,27 +12,35 @@ class Network(nn.Module):
             nn.ReLU(),
         )
 
-        self.critic =  nn.Sequential(
+        self.critic = nn.Sequential(
             nn.Linear(obs_dim + act_dim, hidden), 
             nn.LayerNorm(hidden), 
             nn.GELU(),
             nn.Linear(hidden, 1),
         )
-        
+
         self.critic_target = nn.Sequential(
             nn.Linear(obs_dim + act_dim, hidden), 
             nn.LayerNorm(hidden), 
             nn.GELU(),
             nn.Linear(hidden, 1),
         )
-        
-        # Global (state-independent) log std per action dim
-        self.log_std = nn.Parameter(th.ones(act_dim) * init_log_std)
+
+        # State-dependent log std per action dim
+        self.log_std_net = nn.Sequential(
+            nn.Linear(obs_dim, hidden), 
+            nn.LayerNorm(hidden), 
+            nn.GELU(),
+            nn.Linear(hidden, act_dim),
+        )
 
     def forward(self, obs: th.Tensor):
         actions = self.actor(obs)
         value = self.critic(th.cat([obs, actions], dim=1))
-        std = self.log_std.exp()
+
+        # Compute state-dependent log_std
+        log_std = self.log_std_net(obs)  # Output log_std from state-dependent network
+        std = log_std.exp()  # The std is the exp of log_std
         return actions, std, value
 
     def act(self, obs: th.Tensor):
