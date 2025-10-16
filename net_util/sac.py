@@ -108,12 +108,7 @@ class SAC(PolicyBase):
             self.alpha_tensor = th.tensor(float(cfg.ent_coef), device=self.device)
 
         # Replay (imported). If none passed, create one; user will push transitions.
-        self.buf = rollout_buffer if rollout_buffer is not None else ReplayBuffer(
-            obs_dim=cfg.obs_dim,
-            act_dim=cfg.act_dim,
-            size=cfg.buffer_size,
-            device=self.device,
-        )
+        self.buf = rollout_buffer
         
         self._steps_seen = 0
         self._n_updates = 0
@@ -172,8 +167,8 @@ class SAC(PolicyBase):
             if self.alpha_opt is not None and getattr(self, "log_alpha", None) is not None:
                 with th.no_grad():
                     a_pi, logp_pi, _ = self.net.act(obs)
-                alpha = self.log_alpha.exp().detach()
-                ent_loss = -(self.log_alpha * (logp_pi + self.target_entropy).detach()).mean()
+                alpha = self.log_alpha.detach().exp()
+                ent_loss = -(self.log_alpha * (logp_pi.reshape(-1, 1) + self.target_entropy).detach()).mean()
                 self.alpha_opt.zero_grad(); ent_loss.backward(); self.alpha_opt.step()
                 ent_losses.append(ent_loss.item()); ent_vals.append(alpha.item())
                 writer.add_scalar("loss/entropy_loss_step", ent_loss.item(), self._global_step)
@@ -186,12 +181,12 @@ class SAC(PolicyBase):
             # ----- critic targets -----
             with th.no_grad():
                 a_next, logp_next, _ = self.net.act(nxt)
-                q = self.critic_target(th.cat([nxt, a_next], dim=1))
+                q = self.critic_target(th.cat([nxt, a_next], dim=-1))
                 q_next = q - alpha * logp_next.reshape(-1, 1)
                 targ = rew + (1.0 - done) * self.cfg.gamma * q_next
 
             # ----- critic update -----
-            q1_pred = self.critic(th.cat([obs, act], dim=1))
+            q1_pred = self.critic(th.cat([obs, act], dim=-1))
             c_loss = F.mse_loss(symlog(q1_pred), symlog(targ))
             self.critic_opt.zero_grad()
             c_loss.backward()
@@ -199,7 +194,7 @@ class SAC(PolicyBase):
 
             # ----- actor update -----
             a_pi, logp_pi, _ = self.net.act(obs)
-            q_pi = self.critic_target(th.cat([obs, a_pi], dim=1))
+            q_pi = self.critic_target(th.cat([obs, a_pi], dim=-1))
             a_loss = (alpha * logp_pi - q_pi).mean()
             self.actor_opt.zero_grad(); a_loss.backward(); self.actor_opt.step()
 
@@ -251,6 +246,10 @@ class SAC(PolicyBase):
             "model": self.net.state_dict(),
             "actor_optimizer": self.actor_opt.state_dict(),
             "critic_optimizer": self.critic_opt.state_dict(),
+            "log_alpha": self.log_alpha.detach().cpu(),            # tensor
+            "alpha_opt": (self.alpha_opt.state_dict()              # dict or None
+                        if self.alpha_opt is not None else None),
+            "global_step": self._global_step,
         }, path)
 
         
@@ -260,5 +259,11 @@ class SAC(PolicyBase):
         self.net.load_state_dict(ckpt["model"])
         self.actor_opt.load_state_dict(ckpt["actor_optimizer"])
         self.critic_opt.load_state_dict(ckpt["critic_optimizer"])
+
+        self.log_alpha.data.copy_(ckpt["log_alpha"].to(device))
+        if self.alpha_opt is not None and ckpt["alpha_opt"] is not None:
+            self.alpha_opt.load_state_dict(ckpt["alpha_opt"])
+
+        self._global_step = ckpt.get("global_step", 0)
 
         self.net.to(device)

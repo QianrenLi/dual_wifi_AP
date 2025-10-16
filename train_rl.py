@@ -101,7 +101,7 @@ def main():
         next_id = int(Path(args.load_path).stem) + 1
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     store_path = ckpt_dir / f"{next_id}.pt"
-    lastest_path = ckpt_dir / f"latest.pt"
+    latest_path = ckpt_dir / f"latest.pt"
 
     # TB + training
     writer = SummaryWriter(f"net_util/logs/{cfg_stem}")
@@ -142,7 +142,7 @@ def main():
         if delta >= args.delta_max:
             actor_before = actor_after
             policy.save(store_path)
-            policy.save(lastest_path)
+            policy.save(latest_path)
             next_id += 1
             store_path = ckpt_dir / f"{next_id}.pt"
 

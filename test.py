@@ -163,25 +163,19 @@ def push_rollout_to_trainer(folder: Path):
 
 
 def train_forever(conn: Connector, control_config: str, trace: Path, maybe_load: Path | None = None):
+    Connector("TrainAgent").killproc("train_rl.py", signal="-TERM")
+    print("clean up")
+    time.sleep(2)
     args = {"control_config": control_config, "trace_path": trace}
     if maybe_load is not None:
         args["load_path"] = str(maybe_load)
-    conn.batch("model_train_forever", "model_train", args)
+    conn.batch("TrainAgent", "model_train_forever", args)
     apply_until_done(conn)
 
 
 def pull_trainer_artifacts(exp_name: str):
     """Pull model and train.log from TrainAgent; keep a copy in trial folder."""
-    # model
     Connector("TrainAgent").sync_file(f"net_util/net_cp/{exp_name}/latest.pt", is_pull=True)
-    # train log with timeout
-    # Connector("TrainAgent").sync_file("net_util/logs/train.log", is_pull=True, timeout=1)
-
-    # stash in trial folder
-    # tl = Path("net_util/logs/train.log")
-    # if tl.exists():
-        # tl.rename(out_folder / "train.log")
-
 
 # ---------- High-level routines ----------
 
@@ -257,18 +251,10 @@ def run_iteration(
         traces.append(folder / "rollout.jsonl")
         while len(traces) > max_traces:
             traces.pop(0)
-
-        # pick any control_config (all tx share the same key names)
-        # any_tx = next(iter(tx_srcs))
-        # control_cfg = tx_srcs[any_tx]["control_config"]
-
-        # load_path = Path(f"net_util/net_cp/{exp_name}/{iteration}.pt") if iteration > 0 else None
-        # 
-        # train_t = time.time()
-
+            
         # 6) pull new model & logs
-        next_iter = iteration + 1
-        pull_trainer_artifacts(exp_name, next_iter, folder)
+        if iteration > 5:
+            pull_trainer_artifacts(exp_name)
         end_t = time.time()
 
         print(f"Iteration {iteration}:")
@@ -296,7 +282,7 @@ def train_loop(
         
     traces: List[Path] = []
     max_traces = 1
-    iteration = 3013
+    iteration = 0
     last_iteration = iteration
     
     

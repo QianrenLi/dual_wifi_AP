@@ -16,6 +16,7 @@ from tempfile import NamedTemporaryFile
 import threading
 import time
 import traceback
+import shlex
 from queue import Queue
 
 SERVER_PORT = 11112
@@ -504,6 +505,57 @@ class Handler:
                 _recv_file(self.handler.sock, file_glob)
             
             return {'res': True}
+    class killproc(Request):
+        """
+        Kill processes on the client by pattern, using pkill -f <pattern>.
+
+        Args (dict):
+            pattern: str        # required; substring to match command lines
+            signal:  str|None   # optional; '-TERM', '-KILL', '-INT' (defaults to SIGTERM)
+
+        Returns:
+            {
+            "matched":   [ "<pid> <cmdline>", ... ],
+            "killed":    <int>,               # best-effort estimate
+            "remaining": [ "<pid> <cmdline>", ... ],
+            "pkill_rc":  <int>                # pkill return code (for diagnostics)
+            }
+        """
+        def client(self, args: dict) -> dict:
+            pattern = str(args.get("pattern", "")).strip()
+            if not pattern:
+                raise InvalidRequestException("killproc.pattern must be a non-empty string")
+            signal = args.get("signal")  # e.g. "-TERM", "-KILL", "-INT"
+
+            def _pgrep_lines() -> list[str]:
+                # Don't raise on non-zero; just treat as “no matches”
+                out = sp.run(["pgrep", "-a", "-f", pattern],
+                            stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+                return [ln for ln in out.stdout.splitlines() if ln.strip()]
+
+            matched = _pgrep_lines()
+            if not matched:
+                return {"matched": [], "killed": 0, "remaining": [], "pkill_rc": 0}
+
+            # Build pkill cmd; do NOT use check=True
+            cmd = ["pkill"]
+            if isinstance(signal, str) and signal.strip():
+                cmd.append(signal.strip())  # e.g. "-TERM"
+            cmd += ["-f", pattern]
+
+            pkill_proc = sp.run(cmd, stdout=sp.PIPE, stderr=sp.PIPE)  # check=False on purpose
+
+            # Give the OS a moment to reap before re-check
+            time.sleep(0.05)
+            remaining = _pgrep_lines()
+            killed = max(0, len(matched) - len(remaining))
+
+            return {
+                "matched": matched,
+                "killed": killed,
+                "remaining": remaining,
+                "pkill_rc": pkill_proc.returncode,
+            }
 
 
 
@@ -834,6 +886,13 @@ class Connector(Handler):
     def sync_file(self, file_glob, is_pull:bool=True, timeout = None):
         """Pull explicit files from the connected client to the server using a glob pattern."""
         return self.handle('sync_file', {'file_glob': file_glob, 'is_pull': is_pull, 'timeout': timeout})
+    
+    def killproc(self, pattern: str, signal = None) -> dict:
+        """
+        Ask the target client to kill processes matching 'pattern' via pkill -f.
+        'signal' may be like '-KILL', '-TERM', '-INT'; default SIGTERM if None.
+        """
+        return self.handle("killproc", {"pattern": pattern, "signal": signal})
 
 
     def execute(self, function:str, parameters:dict={}, timeout:float=-1) -> str:

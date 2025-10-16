@@ -210,7 +210,18 @@
                 "load_path": "none"
             },
             "commands":[
-                "python train_rl.py --control_config $control_config --trace_path $trace_path --load_path $load_path &"
+                "nohup python train_rl.py --control_config $control_config --trace_path $trace_path --load_path $load_path >/dev/null 2>&1 &"
+            ]
+        },
+        "cleanup_trainer":{
+            "description": "clean up existing rl trainer",
+            "parameters":{
+                "control_config": "data/control_config.json",
+                "trace_path": "data",
+                "load_path": "none"
+            },
+            "commands":[
+                "pkill -9 -f train_rl"
             ]
         }
     }

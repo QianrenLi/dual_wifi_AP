@@ -195,7 +195,6 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
                 continue
             
             obs_for_policy = {} if timed_out else trace_filter(stats, state_cfg)
-            # print(obs_for_policy)
             
             # 2) Base action + stochastic exploration
             if cfg.default_cmd is not None:
@@ -204,8 +203,8 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
             else:
                 try:
                     res, control_cmd = policy.act(obs_for_policy, is_eval)
-                except:
-                    time.sleep(1)
+                except Exception as e:
+                    print(e)
                     continue
             # Build ControlCmd using canonical mapping (pads/trims internally)
             control_body: Dict[str, ControlCmd] = {}
@@ -297,7 +296,10 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
         
     if policy_load_path:
         print(f"PPO Load {policy_load_path}")
-        policy.load(policy_load_path, device=policy_cfg['device'])
+        try:
+            policy.load(policy_load_path, device=policy_cfg['device'])
+        except:
+            print("Load fail; Fall back to no model")
     state_cfg = control_config.get('state_cfg', None)    
     return cfg, policy, state_cfg, args.eval
     
