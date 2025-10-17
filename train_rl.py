@@ -69,7 +69,7 @@ def main():
     BufferCls = BUFFER_REGISTRY[roll_cfg["buffer_name"]]
 
     # Trace watcher (single root, recursive *.jsonl)
-    watcher = TraceWatcher(args.trace_path, control_cfg, state_transform_json=pol_manifest['state_transform_path'])
+    watcher = TraceWatcher(args.trace_path, control_cfg)
     init_traces = watcher.load_initial_traces()
     while init_traces == []:
         init_traces = watcher.load_initial_traces()

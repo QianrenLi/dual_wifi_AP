@@ -5,6 +5,7 @@ from typing import List, Tuple, Dict
 import numpy as np
 import time
 import json
+import pprint
 from pathlib import Path
 from util.trace_watcher import TraceWatcher
 
@@ -24,12 +25,10 @@ class _Affine:
     mean: np.ndarray  # (D,)
     std:  np.ndarray  # (D,)
 
-    def transform_np(self, x: np.ndarray) -> np.ndarray:
-        return (x - self.mean) / (self.std + EPS)
-
 class DatasetStateNormalizer:
     """
-    Compute ONLY the state normalization from TraceWatcher.
+    Compute ONLY the state normalization from TraceWatcher and
+    write it as a .py file containing STATE_NORMALIZATION dict.
     """
     def __init__(self, watcher: "TraceWatcher") -> None:
         self.watcher = watcher
@@ -59,15 +58,10 @@ class DatasetStateNormalizer:
         S_all = self._merge_state(traces)
         self.state = self._compute_affine(S_all)
 
-    def save_state_json(self, outfile: str | Path, meta: Dict | None = None) -> str:
+    def save_state_py(self, outfile: str | Path, meta: Dict | None = None) -> str:
         """
-        Save state normalization to JSON:
-        {
-          "state": {"mean": [...], "std": [...]},
-          "dim": D,
-          "created_at": "...",
-          "meta": {...}
-        }
+        Write a Python file that defines:
+            STATE_NORMALIZATION = { ... }
         """
         assert self.state is not None, "Call fit_from_initial() first."
         p = Path(outfile)
@@ -81,18 +75,20 @@ class DatasetStateNormalizer:
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "meta": meta or {},
         }
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        body = "STATE_NORMALIZATION = " + pprint.pformat(data, width=100, compact=False) + "\n"
+        p.write_text(body, encoding="utf-8")
         return str(p.resolve())
 
 # --------------------
-# Minimal CLI-style usage (example)
+# Minimal CLI usage
 # --------------------
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--control_config", required=True)
     parser.add_argument("--trace_path", required=True)
-    parser.add_argument("--out", default="state_transform.json")
+    parser.add_argument("--out", default="state_transform.py",
+                        help="Output .py module that defines STATE_NORMALIZATION")
     args = parser.parse_args()
 
     control_cfg = json.loads(Path(args.control_config).read_text(encoding="utf-8"))
@@ -101,9 +97,11 @@ if __name__ == "__main__":
     norm = DatasetStateNormalizer(watcher)
     norm.fit_from_initial()
 
-    out_path = norm.save_state_json(
+    out_path = norm.save_state_py(
         args.out,
-        meta={"trace_path": str(Path(args.trace_path).resolve()),
-              "control_config": str(Path(args.control_config).resolve())}
+        meta={
+            "trace_path": str(Path(args.trace_path).resolve()),
+            "control_config": str(Path(args.control_config).resolve()),
+        }
     )
-    print(f"Saved state transform to: {out_path}")
+    print(f"Saved state transform module to: {out_path}")

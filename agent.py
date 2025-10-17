@@ -281,7 +281,7 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
     policy_cls = POLICY_REGISTRY[policy_name]
     
     policy_construct_cfg = _inflate_dataclass_from_manifest(policy_cfg_cls, policy_cfg)
-    policy: PolicyBase = policy_cls( ControlCmd, policy_construct_cfg)
+    policy: PolicyBase = policy_cls( ControlCmd, policy_construct_cfg, state_transform_dict = control_config['state_transform_dict'])
     
     policy_load_path = policy_cfg['load_path']
     policy_cp_path = Path("net_util/net_cp") / Path(args.control_config).parent.stem

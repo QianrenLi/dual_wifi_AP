@@ -63,8 +63,6 @@ class SAC_Config:
 
     # networks
     network_module_path: str = "net_util.model.sac_model"  # must expose Network(obs_dim, act_dim)
-    state_transform_path: str = "config/transform/state_transform.json"
-
 
 @register_policy
 class SAC(PolicyBase):
@@ -85,8 +83,8 @@ class SAC(PolicyBase):
           - Create matching target networks for both
     """
 
-    def __init__(self, cmd_cls, cfg: SAC_Config, rollout_buffer: ReplayBuffer | None = None, device: str | None = None):
-        super().__init__(cmd_cls, cfg.state_transform_path)
+    def __init__(self, cmd_cls, cfg: SAC_Config, rollout_buffer: ReplayBuffer | None = None, device: str | None = None, state_transform_dict = None):
+        super().__init__(cmd_cls, state_transform_dict = state_transform_dict)
         th.manual_seed(cfg.seed); np.random.seed(cfg.seed)
         self.cfg = cfg
         self.device = th.device(cfg.device) if device is None else th.device(device)

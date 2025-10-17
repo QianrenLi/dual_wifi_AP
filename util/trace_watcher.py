@@ -23,13 +23,13 @@ class TraceWatcher:
         Convenience: load newly appeared jsonl files and return merged traces.
     """
 
-    def __init__(self, root: Union[str, Path], control_config: dict, state_transform_json: Optional[str] = None) -> None:
+    def __init__(self, root: Union[str, Path], control_config: dict) -> None:
         self.root: Path = Path(root).resolve()
         self.control_config = control_config
         self._state_tf: Optional[_StateTransform] = None
-        if state_transform_json:
+        if control_config['state_transform_dict']:
             try:
-                self._state_tf = _StateTransform.from_json(state_transform_json)
+                self._state_tf = _StateTransform.from_obj(control_config['state_transform_dict'])
             except Exception as e:
                 # Fall back silently (or log if you prefer)
                 print(f"[PolicyBase] Failed to load state transform: {e}")

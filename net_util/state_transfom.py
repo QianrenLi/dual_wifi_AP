@@ -1,7 +1,5 @@
-import json
 import numpy as np
-from pathlib import Path
-from typing import List
+from typing import List, Dict
 
 EPS = 1e-8
 
@@ -13,8 +11,7 @@ class _StateTransform:
         self.dim  = int(self.mean.shape[0])
 
     @classmethod
-    def from_json(cls, path: str | Path) -> "_StateTransform":
-        obj = json.loads(Path(path).read_text(encoding="utf-8"))
+    def from_obj(cls, obj: Dict) -> "_StateTransform":
         st = obj.get("state", {})
         mean = st.get("mean", [])
         std  = st.get("std", [])

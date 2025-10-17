@@ -22,7 +22,7 @@ class PolicyBase:
         self,
         cmd_cls: Type[ControlCmd],
         seed: Optional[int] = None,
-        state_transform_json: Optional[str] = None
+        state_transform_dict: Optional[dict] = None
     ):
         self.cmd_cls = cmd_cls
         self.action_dim: int = cmd_cls.__dim__()
@@ -32,9 +32,9 @@ class PolicyBase:
         self.opt = None
 
         self._state_tf: Optional[_StateTransform] = None
-        if state_transform_json:
+        if state_transform_dict:
             try:
-                self._state_tf = _StateTransform.from_json(state_transform_json)
+                self._state_tf = _StateTransform.from_obj(state_transform_dict)
             except Exception as e:
                 # Fall back silently (or log if you prefer)
                 print(f"[PolicyBase] Failed to load state transform: {e}")
@@ -56,10 +56,8 @@ class PolicyBase:
         2) If a state transform is configured, normalize it.
         """
         vec = flatten_leaves(obs)  # -> List[float]
-        print(vec)
         if self._state_tf is not None:
             vec = self._state_tf.apply_to_list(vec)
-            print(vec)
         return vec
 
     def train_per_epoch(self, epoch, writer=None):
