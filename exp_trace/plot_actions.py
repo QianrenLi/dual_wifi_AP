@@ -59,7 +59,7 @@ def _smooth(y: List[float], window: int) -> List[float]:
     return np.convolve(y, kernel, mode="same").tolist()
 
 def plot_actions(root: str | Path, recent: int = 0, stride: Optional[int] = None,
-                 smooth: int = 1, action_selection = None,
+                 smooth: int = 1, action_selection: Optional[int] = None,
                  ax=None, labels: Optional[List[str]] = None):
     root = Path(root)
     trials = _list_trials(root, recent)
@@ -73,38 +73,68 @@ def plot_actions(root: str | Path, recent: int = 0, stride: Optional[int] = None
         return ax
 
     D = len(acts[0])
-    series: List[List[float]] = [[] for _ in range(D)]
+    raw_series: List[List[float]] = [[] for _ in range(D)]
     for vec in acts:
         if len(vec) == D:
             for i in range(D):
-                series[i].append(vec[i])
+                raw_series[i].append(vec[i])
 
-    xs = list(range(1, len(series[0]) + 1))
+    xs = list(range(1, len(raw_series[0]) + 1))
     if stride and stride > 1:
         xs = xs[::stride]
         for i in range(D):
-            series[i] = series[i][::stride]
+            raw_series[i] = raw_series[i][::stride]
 
+    # Prepare smoothed copy (keeps raw for background plotting)
+    smoothed_series: Optional[List[List[float]]] = None
     if smooth > 1:
-        for i in range(D):
-            series[i] = _smooth(series[i], smooth)
+        smoothed_series = [ _smooth(raw_series[i], smooth) for i in range(D) ]
 
     if ax is None:
         _, ax = plt.subplots()
 
+    def _label_for(i: int) -> str:
+        return labels[i] if labels and i < len(labels) else f"a{i}"
+
+    # Styling
+    lw_raw = 1.0
+    lw_smooth = 2.0
+    alpha_raw = 0.10
+    z_raw = 1
+    z_smooth = 2
+
+    # Plot helper for one dimension
+    def plot_dim(i: int):
+        base_label = _label_for(i)
+        if smoothed_series is None:
+            # No smoothing: plot only raw
+            ax.plot(xs, raw_series[i], label=base_label)
+            return
+
+        # With smoothing: plot raw in background, smoothed on top using same color
+        # Grab a color from the cycler once per dimension
+        color = ax._get_lines.get_next_color()
+        # Raw background
+        ax.plot(xs, raw_series[i], label=f"{base_label} (raw)", linewidth=lw_raw,
+                alpha=alpha_raw, zorder=z_raw, color=color)
+        # Smoothed foreground
+        ax.plot(xs, smoothed_series[i], label=f"{base_label} (smoothed w={smooth})",
+                linewidth=lw_smooth, zorder=z_smooth, color=color)
+
     if action_selection is not None:
-        lab = labels[action_selection] if labels and action_selection < len(labels) else f"a{action_selection}"
-        ax.plot(xs, series[action_selection], label=lab)
+        if 0 <= action_selection < D:
+            plot_dim(action_selection)
+        else:
+            ax.set_title(f"Selected action index {action_selection} out of range (D={D})")
     else:
         for i in range(D):
-            lab = labels[i] if labels and i < len(labels) else f"a{i}"
-            ax.plot(xs, series[i], label=lab)
+            plot_dim(i)
 
     ax.set_xlabel("global step")
     ax.set_ylabel("action value")
     ax.set_title(f"res.action over time • root={root.name} • recent={recent or 'all'}")
-    ax.legend()
-    ax.grid(True)
+    ax.legend(ncol=2 if smoothed_series is not None else 1, fontsize=9)
+    ax.grid(True, linestyle="--", alpha=0.4)
     return ax
 
 # -------- CLI --------
@@ -120,7 +150,13 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    plot_actions(root=args.root, recent=args.recent, stride=args.stride, smooth=args.smooth, action_selection=args.selected)
+    plot_actions(
+        root=args.root,
+        recent=args.recent,
+        stride=args.stride,
+        smooth=args.smooth,
+        action_selection=args.selected
+    )
     plt.tight_layout()
     plt.show()
 

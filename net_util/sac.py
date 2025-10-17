@@ -258,7 +258,7 @@ class SAC(PolicyBase):
             a_pi, logp_pi, _ = self.net.act(obs)
             q1_pi = self.critic1(th.cat([obs, a_pi], dim=-1))
             q2_pi = self.critic2(th.cat([obs, a_pi], dim=-1))
-            q_pi_min = th.min(q1_pi, q2_pi)
+            q_pi_min = symlog(th.min(q1_pi, q2_pi))
             a_loss = (alpha * logp_pi - q_pi_min).mean()
             self.actor_opt.zero_grad()
             a_loss.backward()
