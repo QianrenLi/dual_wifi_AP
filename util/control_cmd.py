@@ -62,8 +62,14 @@ class CListFloat:
             raise ValueError(f"Must have exactly {self.dim} elements")
         lo, hi = self.value_range
         clipped = []
-        for v in values:
-            clipped.append(v * (hi - lo) / 2 + (hi + lo) / 2)
+        for value in values:
+            value = value * (hi - lo) / 2 + (hi + lo) / 2
+            if lo is not None and value < lo:
+                value = lo
+            if hi is not None and value > hi:
+                value = hi
+            clipped.append(value)
+            
         self.values = clipped
 
     def to_jsonable(self):
@@ -83,15 +89,14 @@ class CInt:
             value = value[0]
             
         lo, hi = self.value_range
-        value = int(value * (hi - lo) / 2 + (hi + lo) / 2)
+        value = value * (hi - lo) / 2 + (hi + lo) / 2
         
-        lo, hi = self.value_range
         if lo is not None and value < lo:
             value = lo
         if hi is not None and value > hi:
             value = hi
 
-        self.value = value
+        self.value = int(value)
 
     def to_jsonable(self):
         return self.value
@@ -137,6 +142,29 @@ class ControlCmd:
     def value(self):
         value = cmd_to_list(self)
         return value
+    
+    @staticmethod
+    def sum_log_scales() -> float:
+        """
+        Sum of log scale factors for tanh->linear mapping per continuous action dim:
+            a = b + s * u,  where s = (hi - lo) / 2
+        Only counts continuous (CListFloat) fields. Integers are excluded.
+        """
+        C = 0.0
+        for name, field in ControlCmd.__dataclass_fields__.items():
+            ftype = field.type
+            # Only include continuous list-of-floats fields
+            if not isinstance(ftype, type) or not issubclass(ftype, CListFloat):
+                continue
+            lo, hi = ftype.value_range
+            if lo is None or hi is None:
+                raise ValueError(f"Field '{name}' has open range {ftype.value_range}; cannot compute scale.")
+            s = (hi - lo) / 2.0
+            if s <= 0:
+                raise ValueError(f"Field '{name}' has non-positive scale (lo={lo}, hi={hi}).")
+            C += ftype.dim * np.log(s)
+        return C
+        
             
             
 def cmd_to_list(cmd: ControlCmd) -> List[float]:

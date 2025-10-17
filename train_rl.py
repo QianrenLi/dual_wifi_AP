@@ -54,7 +54,7 @@ def main():
     ap.add_argument("--trace_path", required=True, help="Root folder to watch; all **/*.jsonl included")
     ap.add_argument("--load_path", default=None)
     ap.add_argument("--delta-min", type=float, default=5e-4)
-    ap.add_argument("--delta-max", type=float, default=10.0)
+    ap.add_argument("--delta-max", type=float, default=0.1)
     args = ap.parse_args()
 
     with open(args.control_config, "r", encoding="utf-8") as f:
@@ -69,7 +69,7 @@ def main():
     BufferCls = BUFFER_REGISTRY[roll_cfg["buffer_name"]]
 
     # Trace watcher (single root, recursive *.jsonl)
-    watcher = TraceWatcher(args.trace_path, control_cfg)
+    watcher = TraceWatcher(args.trace_path, control_cfg, state_transform_json=pol_manifest['state_transform_path'])
     init_traces = watcher.load_initial_traces()
     while init_traces == []:
         init_traces = watcher.load_initial_traces()
@@ -123,26 +123,29 @@ def main():
         return False
 
     epoch = 0
+    store_int = 30
+    last_trained_time = time.time()
     while True:
-        policy.train_per_epoch(epoch, writer=writer)
-        # Extend when new data appears
-        _extend_with_new()
-
+        trained = policy.train_per_epoch(epoch, writer=writer); _extend_with_new()
+        
+        if not trained:
+            time.sleep(10)
+            continue
+        
         # Actor drift
         actor_after = _flatten_params(getattr(policy, "actor", None))
-        # n = min(actor_before.numel(), actor_after.numel())
         delta = float((actor_after - actor_before).norm(p=2).item())
         writer.add_scalar("params/delta_actor_epoch_L2", delta, epoch)
-        # If changes are tiny, block until a new trace arrives, then extend once
-        if delta <= args.delta_min:
-            while not _extend_with_new():
-                time.sleep(1)
 
         # Big jump → save and roll checkpoint id
-        if delta >= args.delta_max:
+        trained_time = time.time()
+        if delta >= args.delta_max or (trained_time - last_trained_time) >= 60 * 5:
             actor_before = actor_after
-            policy.save(store_path)
+            last_trained_time = trained_time
             policy.save(latest_path)
+            
+        if epoch % store_int == 0: # For checkpointer purpose
+            policy.save(store_path)
             next_id += 1
             store_path = ckpt_dir / f"{next_id}.pt"
 

@@ -63,6 +63,7 @@ class SAC_Config:
 
     # networks
     network_module_path: str = "net_util.model.sac_model"  # must expose Network(obs_dim, act_dim)
+    state_transform_path: str = "config/transform/state_transform.json"
 
 
 @register_policy
@@ -85,7 +86,7 @@ class SAC(PolicyBase):
     """
 
     def __init__(self, cmd_cls, cfg: SAC_Config, rollout_buffer: ReplayBuffer | None = None, device: str | None = None):
-        super().__init__(cmd_cls)
+        super().__init__(cmd_cls, cfg.state_transform_path)
         th.manual_seed(cfg.seed); np.random.seed(cfg.seed)
         self.cfg = cfg
         self.device = th.device(cfg.device) if device is None else th.device(device)
@@ -93,7 +94,7 @@ class SAC(PolicyBase):
         # Load network module
         net_mod = importlib.import_module(cfg.network_module_path)
         Network = getattr(net_mod, "Network")
-        self.net: nn.Module = Network(cfg.obs_dim, cfg.act_dim).to(self.device)
+        self.net: nn.Module = Network(cfg.obs_dim, cfg.act_dim, scale_log_offset = self.cmd_cls.sum_log_scales()).to(self.device)
 
         # --- actor ---
         self.actor: nn.Module = self.net.actor
@@ -130,18 +131,20 @@ class SAC(PolicyBase):
             self.critic2_target: nn.Module = c2_t
 
         self.net.to(self.device)
-
         # Hard-sync targets
         hard_update(self.critic1_target, self.critic1)
         hard_update(self.critic2_target, self.critic2)
 
         # Optimizers
-        self.actor_opt  = th.optim.Adam(self.actor.parameters(),  lr=cfg.lr)
+        self.actor_opt = th.optim.Adam(list(self.actor.parameters()) \
+                    + list(self.net.log_std_net.parameters()) \
+                    + [self.net.log_std_bias], lr=cfg.lr)
+        
         # Include BOTH critics' parameters
         self.critic_opt = th.optim.Adam(list(self.critic1.parameters()) + list(self.critic2.parameters()), lr=cfg.lr)
 
         # Temperature α
-        self.target_entropy = (-float(cfg.act_dim)) if cfg.target_entropy == "auto" else float(cfg.target_entropy)
+        self.target_entropy = (- float(cfg.act_dim)) if cfg.target_entropy == "auto" else float(cfg.target_entropy)
         self.log_alpha: Optional[th.Tensor] = None
         self.alpha_opt: Optional[th.optim.Adam] = None
         if cfg.ent_coef == "auto":
@@ -171,19 +174,18 @@ class SAC(PolicyBase):
         """
         obs = th.tensor(obs_vec, device=self.device).float()
         if is_evaluate:
-            action, log_prob, _ = self.net(obs)
+            action, log_prob, v_like = self.net(obs)
+            action = th.tanh(action)
+            qa = self.critic1(th.cat([obs, action], dim=-1))
+            qb = self.critic2(th.cat([obs, action], dim=-1))
+            v_like = th.min(qa, qb).detach().cpu().numpy()
         else:
-            action, log_prob, _ = self.net.act(obs)
-
-        # compute minQ as a cheap "value-like" output
-        qa = self.critic1(th.cat([obs, action], dim=-1))
-        qb = self.critic2(th.cat([obs, action], dim=-1))
-        v_like = th.min(qa, qb)
+            action, log_prob, v_like = self.net.act(obs)
 
         return {
             "action": action.detach().cpu().numpy(),
             "log_prob": log_prob.detach().cpu().numpy(),
-            "value": v_like.detach().cpu().numpy(),
+            "value": v_like,
         }
 
     # ---- Training loop ----
@@ -218,7 +220,8 @@ class SAC(PolicyBase):
         steps_done = 0
         for obs, act, rew, nxt, done in self.buf.get_minibatches(self.cfg.batch_size):
             if steps_done >= self.cfg.gradient_steps:
-                break
+                return False
+            
             steps_done += 1
 
             # ----- Temperature α update -----
@@ -226,12 +229,11 @@ class SAC(PolicyBase):
                 with th.no_grad():
                     a_pi_for_alpha, logp_pi_for_alpha, _ = self.net.act(obs)
                 alpha = self.log_alpha.detach().exp()
-                ent_loss = -(self.log_alpha * (logp_pi_for_alpha.reshape(-1, 1) + self.target_entropy).detach()).mean()
+                ent_loss = -(self.log_alpha * (logp_pi_for_alpha + self.target_entropy).detach()).mean()
                 self.alpha_opt.zero_grad()
                 ent_loss.backward()
                 self.alpha_opt.step()
                 ent_losses.append(ent_loss.item()); ent_vals.append(alpha.item())
-                writer.add_scalar("loss/entropy_loss_step", ent_loss.item(), self._global_step)
                 writer.add_scalar("sac/alpha_step", alpha.item(), self._global_step)
             else:
                 alpha = self.alpha_tensor
@@ -279,14 +281,6 @@ class SAC(PolicyBase):
             qmin_vals.append(q_pi_min.mean().item())
             log_pi_vals.append(logp_pi.detach().mean().item())
 
-            # per-step logs
-            writer.add_scalar("loss/actor_step", a_loss.item(), self._global_step)
-            writer.add_scalar("loss/critic_step", c_loss.item(), self._global_step)
-            writer.add_scalar("q/q1_mean_step", q1_vals[-1], self._global_step)
-            writer.add_scalar("q/q2_mean_step", q2_vals[-1], self._global_step)
-            writer.add_scalar("q/qmin_pi_step", qmin_vals[-1], self._global_step)
-            writer.add_scalar("policy/logp_pi_step", log_pi_vals[-1], self._global_step)
-
         # LR / epoch aggregates
         try:
             lr = next(iter(self.actor_opt.param_groups))["lr"]
@@ -306,7 +300,7 @@ class SAC(PolicyBase):
             writer.flush()
             writer.close()
 
-        return 0.0  # keep signature stable
+        return True  # keep signature stable
 
     # ---- Checkpointing ----
     def save(self, path: str):

@@ -285,7 +285,6 @@ def train_loop(
     iteration = 0
     last_iteration = iteration
     
-    
     path = paths[ path_id(iteration) ]
     print(f"Train config {path}")
     tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
@@ -307,14 +306,6 @@ def train_loop(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
             duration, exp_name, iteration, traces, max_traces
         )
-        
-        if last_iteration == iteration:
-            path = paths[ path_id(iteration) ]
-            print(f"Train config {path}")
-            tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
-            continue
-        
-        last_iteration = iteration
 
 
 def evaluate(

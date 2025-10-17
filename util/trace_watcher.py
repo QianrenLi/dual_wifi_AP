@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Tuple, Union
+from typing import Iterable, List, Tuple, Union, Optional
 
 from util.trace_collec import trace_collec, flatten_leaves
-
+from net_util.state_transfom import _StateTransform
 
 class TraceWatcher:
     """
@@ -23,9 +23,18 @@ class TraceWatcher:
         Convenience: load newly appeared jsonl files and return merged traces.
     """
 
-    def __init__(self, root: Union[str, Path], control_config: dict) -> None:
+    def __init__(self, root: Union[str, Path], control_config: dict, state_transform_json: Optional[str] = None) -> None:
         self.root: Path = Path(root).resolve()
         self.control_config = control_config
+        self._state_tf: Optional[_StateTransform] = None
+        if state_transform_json:
+            try:
+                self._state_tf = _StateTransform.from_json(state_transform_json)
+            except Exception as e:
+                # Fall back silently (or log if you prefer)
+                print(f"[PolicyBase] Failed to load state transform: {e}")
+                self._state_tf = None
+                
         self._seen: set[str] = set()
         self._init_seen()
 
@@ -89,7 +98,10 @@ class TraceWatcher:
                 state_descriptor=self.control_config.get("state_cfg", None),
                 reward_descriptor=self.control_config.get("reward_cfg", None),
             )
-            s = [flatten_leaves(x) for x in s]
+            if self._state_tf is not None:
+                s = [self._state_tf.apply_to_list(flatten_leaves(x)) for x in s]
+            else:
+                s = [flatten_leaves(x) for x in s]
             a = [flatten_leaves(x) for x in a]
             r = [flatten_leaves(x) for x in r]
             merged.append((s, a, r, net))

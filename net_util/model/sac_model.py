@@ -2,7 +2,7 @@ import torch as th
 import torch.nn as nn
 
 class Network(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128, init_log_std: float = 0.0, log_std_min: float = -10, log_std_max: float = 2.0):
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128, init_log_std: float = -2.0, log_std_min: float = -20, log_std_max: float = 2.0, scale_log_offset = 0):
         super().__init__()
         # ----- Actor -----
         self.actor = nn.Sequential(
@@ -10,7 +10,6 @@ class Network(nn.Module):
             nn.LayerNorm(hidden),
             nn.GELU(),
             nn.Linear(hidden, act_dim),
-            nn.Tanh(),  # Output between -1 and 1 for the actions
         )
 
         # ----- Twin Critics -----
@@ -43,15 +42,14 @@ class Network(nn.Module):
 
         # ----- State-dependent log std per action dim -----
         self.log_std_net = nn.Sequential(
-            nn.Linear(obs_dim, hidden),
-            nn.LayerNorm(hidden),
-            nn.GELU(),
-            nn.Linear(hidden, act_dim),
+            nn.Linear(obs_dim, act_dim),
         )
+        self.log_std_bias = nn.Parameter(th.full((act_dim,), init_log_std))
 
         # Parameters for constraining log_std
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
+        self.scale_log_offset = scale_log_offset
 
     def forward(self, obs: th.Tensor):
         """
@@ -63,43 +61,44 @@ class Network(nn.Module):
         actions = self.actor(obs)
         log_std = self.log_std_net(obs)
         
-        # Apply tanh and scaling to constrain log_std to the range [-10, 2] or a similar desired range
-        log_std = th.tanh(log_std)  # Apply tanh to limit the range to [-1, 1]
-        log_std = log_std * (self.log_std_max - self.log_std_min) / 2  # Scale to the target range
-        log_std = log_std + (self.log_std_max + self.log_std_min) / 2  # Shift the values to be in the target range
-
         # Ensure the log_std is within the min/max bounds (extra safety clamp)
+        log_std = self.log_std_bias + self.log_std_net(obs)
         log_std = th.clamp(log_std, self.log_std_min, self.log_std_max)
 
         std = log_std.exp()  # Convert log_std to standard deviation
         return actions, std, 0
 
+    @staticmethod
+    def _tanh_log_det_jacobian(u: th.Tensor) -> th.Tensor:
+        # Stable: log(1 - tanh(u)^2) = 2 * (log(2) - u - softplus(-2u))
+        return 2.0 * (th.log(th.tensor(2.0, device=u.device)) - u - th.nn.functional.softplus(-2.0 * u))
+
     def act(self, obs: th.Tensor):
         """
-        Stochastic action (reparameterized), log_prob, and min-Q value.
-        """
-        mean, std, value = self(obs)
-        dist = th.distributions.Normal(mean, std)
-        action = dist.rsample()  # reparameterized sample
-        log_prob = dist.log_prob(action).sum(-1)
-        return action, log_prob, value
-
-    def evaluate_actions(self, obs: th.Tensor, actions: th.Tensor):
-        """
-        Evaluate provided actions under current policy.
         Returns:
-            value:   min(Q1, Q2) at (obs, actions)
-            log_prob, entropy
+            a:        squashed action in (-1, 1), shape (B, act_dim)
+            log_prob: log π(a|s) with tanh correction, shape (B, 1)
+            value:    min-Q estimate placeholder (unchanged here)
         """
-        # Policy stats for log_prob/entropy
-        mean, std, _ = self(obs)
+        mean, std, value = self(obs)                   # mean = actor(obs), std = exp(log_std)
         dist = th.distributions.Normal(mean, std)
-        log_prob = dist.log_prob(actions).sum(-1)
-        entropy = dist.entropy().sum(-1)
 
-        # Twin Q for provided actions
-        inp = th.cat([obs, actions], dim=-1)
-        q1 = self.critic1(inp)
-        q2 = self.critic2(inp)
-        value = th.minimum(q1, q2)
-        return value, log_prob, entropy
+        u = dist.rsample()                             # pre-squash action (reparameterized)
+        a = th.tanh(u)                                 # bounded action
+
+        # base log prob under N(mean, std): sum over action dims
+        logp_u = dist.log_prob(u).sum(dim=-1, keepdim=True)
+
+        # change-of-variables correction: - sum log |det J_tanh(u)|
+        # where log|det J| = sum_i log(1 - tanh(u_i)^2).
+        # Using stable closed form:
+        log_det = self._tanh_log_det_jacobian(u).sum(dim=-1, keepdim=True)
+
+        log_prob = logp_u - log_det
+
+        # If you later scale a to env bounds with a = scale * a + bias,
+        # subtract sum(log|scale|) here via self.scale_log_offset:
+        if self.scale_log_offset:
+            log_prob = log_prob - self.scale_log_offset
+
+        return a, log_prob, value
