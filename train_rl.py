@@ -69,7 +69,7 @@ def main():
     BufferCls = BUFFER_REGISTRY[roll_cfg["buffer_name"]]
 
     # Trace watcher (single root, recursive *.jsonl)
-    watcher = TraceWatcher(args.trace_path, control_cfg)
+    watcher = TraceWatcher(args.trace_path, control_cfg, max_step=10)
     init_traces = watcher.load_initial_traces()
     while init_traces == []:
         init_traces = watcher.load_initial_traces()
@@ -125,7 +125,11 @@ def main():
     store_int = 30
     last_trained_time = time.time()
     while True:
-        trained = policy.train_per_epoch(epoch, writer=writer); _extend_with_new()
+        print("train")
+        print(len(policy.buf.episodes))
+        trained = policy.train_per_epoch(epoch, writer=writer)
+        print("train_finished")
+        _extend_with_new()
         
         if not trained:
             time.sleep(10)
@@ -154,12 +158,12 @@ def main():
 if __name__ == "__main__":
     # Example: generate test config files then run
     import importlib.util
-    cfg_path = Path("/home/qianren/workspace/dual_wifi_AP/config/rtt_only.py")
+    cfg_path = Path("/home/qianren/workspace/dual_wifi_AP/config/rnn_test.py")
     spec = importlib.util.spec_from_file_location("exp_config", cfg_path)
     cfg_mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(cfg_mod)
     policy_configs = cfg_mod.policy_config()
 
-    net_dir = Path("net_util/net_config/test"); net_dir.mkdir(parents=True, exist_ok=True)
+    net_dir = Path("net_util/net_config/test_rnn"); net_dir.mkdir(parents=True, exist_ok=True)
     with open(net_dir / "test.json", "w") as f:
         json.dump(next(iter(next(iter(policy_configs.values())).values())), f, indent=4)
 
