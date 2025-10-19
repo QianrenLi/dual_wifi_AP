@@ -83,7 +83,7 @@ def main():
         gamma=roll_cfg.get("gamma"),
         lam=roll_cfg.get("lam"),
         reward_agg=roll_cfg.get("reward_agg", "sum"),
-        buffer_max=roll_cfg.get("buffer_max", 100_000),
+        buffer_max=roll_cfg.get("buffer_max", 10_000_000),
     )
 
     # Policy
@@ -118,7 +118,6 @@ def main():
                 gamma=roll_cfg.get("gamma"),
                 lam=roll_cfg.get("lam"),
             )
-            writer.add_scalar("traces/new_count", len(new_traces), getattr(policy, "_global_step", 0))
             return True
         return False
 

@@ -258,8 +258,8 @@ class SAC(PolicyBase):
             a_pi, logp_pi, _ = self.net.act(obs)
             q1_pi = self.critic1(th.cat([obs, a_pi], dim=-1))
             q2_pi = self.critic2(th.cat([obs, a_pi], dim=-1))
-            q_pi_min = symlog(th.min(q1_pi, q2_pi))
-            a_loss = (alpha * logp_pi - q_pi_min).mean()
+            q_pi_min = th.min(q1_pi, q2_pi)
+            a_loss = (alpha * logp_pi - symlog(q_pi_min)).mean()
             self.actor_opt.zero_grad()
             a_loss.backward()
             self.actor_opt.step()
@@ -278,6 +278,12 @@ class SAC(PolicyBase):
             q2_vals.append(q2_pred.mean().item())
             qmin_vals.append(q_pi_min.mean().item())
             log_pi_vals.append(logp_pi.detach().mean().item())
+            
+            writer.add_scalar("loss/actor_step", actor_losses[-1], self._global_step)
+            writer.add_scalar("loss/critic_step", critic_losses[-1], self._global_step)
+            writer.add_scalar("loss/entropy_step", ent_losses[-1], self._global_step)
+            writer.add_scalar("q/qmin_pi_step", qmin_vals[-1], self._global_step)
+            writer.add_scalar("policy/logp_pi_step", log_pi_vals[-1], self._global_step)
 
         # LR / epoch aggregates
         try:
