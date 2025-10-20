@@ -237,7 +237,7 @@ class SACRNN(PolicyBase):
             action = th.tanh(mu)
             q1, q2 = self.net.q(feat, action)
             logp = th.zeros(1, 1, device=self.device)
-            v_like = th.min(q1, q2)
+            v_like = th.min(q1, q2)[0].detach().cpu().numpy()
         else:
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
@@ -247,7 +247,7 @@ class SACRNN(PolicyBase):
         return {
             "action":   action[0].detach().cpu().numpy(),
             "log_prob": logp[0].detach().cpu().numpy(),
-            "value":    v_like[0].detach().cpu().numpy(),
+            "value":    v_like
         }
 
     def save(self, path: str):
@@ -267,7 +267,7 @@ class SACRNN(PolicyBase):
 
     def load(self, path: str, device: str):
         """Load the model and optimizer states."""
-        checkpoint = th.load(path, map_location=device)
+        checkpoint = th.load(path, map_location=device, weights_only=False)
         self.net.load_state_dict(checkpoint['model_state_dict'])
         self.actor_opt.load_state_dict(checkpoint['actor_opt_state_dict'])
         self.critic_opt.load_state_dict(checkpoint['critic_opt_state_dict'])
