@@ -256,22 +256,6 @@ class SACRNNPri(PolicyBase):
             "value":    v_like
         }
         
-    def _pre_act(self, obs: Dict[str, Any]) -> List[float]:
-        """
-        1) Flatten nested obs into a single vector.
-        2) If a state transform is configured, normalize it.
-        """
-        temp = copy.deepcopy(obs)
-        if self.last_obs is None:
-            vec = flatten_leaves(obs)
-        else:
-            vec = flatten_leaves( shift_res_action_in_states([self.last_obs, obs], path=("rnn", "res", "action"))[1] )  # -> List[float]
-        self.last_obs = temp
-            
-        if self._state_tf is not None:
-            vec = self._state_tf.apply_to_list(vec)
-        return vec
-
     def save(self, path: str):
         """Save the model and optimizer states."""
         checkpoint = {

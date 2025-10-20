@@ -476,7 +476,7 @@ if __name__ == "__main__":
         "queues":     {"rule": "queues_only_ac1", "pos": "agent"},
         "rtt":        {"rule": True, "pos": "flow", "copied": "rnn"},
         # "outage_rate":{"rule": True, "pos": "flow"},
-        # "res.action":     {"rule": True, "pos": "flow"},
+        "res.action":     {"rule": True, "pos": "flow", "copied": "rnn"},
     }
 
     example_js_str = '''

@@ -161,6 +161,10 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
 
     ctrl = ipc_control(cfg.server_ip, cfg.server_port, cfg.local_port, link_name="agent")
 
+    last_res = None
+    default_res = {
+        "action": [0, 0, 0, 0, 0], "log_prob": [0], "value": 0
+    }
     # Duration control
     first_ok_stats_t: Optional[float] = None
     with open(jsonl_path, "w", encoding="utf-8") as jf:
@@ -194,8 +198,10 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
             if timed_out:
                 continue
             
-            obs_for_policy = {} if timed_out else trace_filter(stats, state_cfg)
-            
+            obs_for_policy = {} if timed_out else trace_filter(
+                {'stats': stats, 'res': last_res if last_res is not None else default_res}
+                , state_cfg
+            )
             # 2) Base action + stochastic exploration
             if cfg.default_cmd is not None:
                 control_cmd:ControlCmd = revive_jsonlike(cfg.default_cmd)
@@ -203,6 +209,7 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
             else:
                 try:
                     res, control_cmd = policy.act(obs_for_policy, is_eval)
+                    last_res = res
                 except Exception as e:
                     print(e)
                     continue
