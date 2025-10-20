@@ -43,7 +43,7 @@ class PolicyBase:
     def tf_act(self, obs_vec: List[float], is_evaluate: bool = False) -> Dict[str, Any]:
         raise NotImplementedError
 
-    # --- policy API ---
+    # --- agent API ---
     def act(self, obs: Dict[str, Any], is_evaluate: bool = False) -> List[float]:
         vector = self._pre_act(obs)
         res = self.tf_act(vector, is_evaluate)

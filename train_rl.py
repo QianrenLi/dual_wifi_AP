@@ -105,7 +105,7 @@ def main():
 
     # TB + training
     writer = SummaryWriter(f"net_util/logs/{cfg_stem}")
-    actor_before = _flatten_params(getattr(policy, "actor", None))
+    actor_before = _flatten_params(getattr(policy, "net", None))
 
     def _extend_with_new():
         new_traces = watcher.poll_new_traces()
@@ -136,7 +136,7 @@ def main():
             continue
         
         # Actor drift
-        actor_after = _flatten_params(getattr(policy, "actor", None))
+        actor_after = _flatten_params(getattr(policy, "net", None))
         delta = float((actor_after - actor_before).norm(p=2).item())
         writer.add_scalar("params/delta_actor_epoch_L2", delta, epoch)
 
@@ -158,13 +158,12 @@ def main():
 if __name__ == "__main__":
     # Example: generate test config files then run
     import importlib.util
-    cfg_path = Path("/home/qianren/workspace/dual_wifi_AP/config/rnn_test.py")
+    cfg_path = Path("/home/qianren/workspace/dual_wifi_AP/config/rnn_test_2.py")
     spec = importlib.util.spec_from_file_location("exp_config", cfg_path)
     cfg_mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(cfg_mod)
     policy_configs = cfg_mod.policy_config()
 
-    net_dir = Path("net_util/net_config/test_rnn"); net_dir.mkdir(parents=True, exist_ok=True)
+    net_dir = Path("net_util/net_config/test_rnn_2"); net_dir.mkdir(parents=True, exist_ok=True)
     with open(net_dir / "test.json", "w") as f:
         json.dump(next(iter(next(iter(policy_configs.values())).values())), f, indent=4)
-
     main()
