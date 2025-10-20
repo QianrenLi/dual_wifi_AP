@@ -83,7 +83,7 @@ class RNNPriReplayBuffer:
     priority_alpha: float = 1.0                # exponent: weight = (eps + loss)^alpha
     priority_eps: float = 1e-3                 # stability: avoid zero weight
     _next_eid: int = 0                         # internal monotonic id
-    beta = 0.9
+    beta = 0
 
     # ---------- Construction ----------
     @staticmethod
@@ -178,7 +178,7 @@ class RNNPriReplayBuffer:
             done_np[-1] = 1.0
 
         eid = self._alloc_eid()
-        ep = Episode(eid, obs_np, act_np, rew_np, next_obs_np, done_np, self.device, init_loss=1.0 if init_loss is None else float(init_loss))
+        ep = Episode(eid, obs_np, act_np, rew_np, next_obs_np, done_np, self.device, init_loss=100.0 if init_loss is None else float(init_loss))
         self.episodes.append(ep)
         self._evict_if_needed()
         return eid
