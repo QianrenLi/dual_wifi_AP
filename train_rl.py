@@ -142,7 +142,7 @@ def main():
 
         # Big jump → save and roll checkpoint id
         trained_time = time.time()
-        if delta >= args.delta_max or (trained_time - last_trained_time) >= 60 * 5:
+        if delta >= args.delta_max or (trained_time - last_trained_time) >= 60:
             actor_before = actor_after
             last_trained_time = trained_time
             policy.save(latest_path)

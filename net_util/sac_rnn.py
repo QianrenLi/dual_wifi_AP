@@ -142,7 +142,9 @@ class SACRNN(PolicyBase):
             c_loss.backward()
 
             # critic grad stats (before step)
-            critic_gn = _grad_global_norm(self.net.critic_parameters())
+            # critic_gn = _grad_global_norm(self.net.critic_parameters())
+            critic_gn = th.nn.utils.clip_grad_norm_(self.net.critic_parameters(), 1.0)
+            
             self.critic_opt.step()
 
             # actor step: heads only; critics frozen; FE detached
@@ -152,9 +154,9 @@ class SACRNN(PolicyBase):
                 qmin_pi = th.min(q1_pi, q2_pi)
                 a_loss = (alpha * logp_pi - symlog(qmin_pi)).mean()
                 a_loss.backward()
-
+                actor_gn = th.nn.utils.clip_grad_norm_(self.net.actor_parameters(), 1.0)
                 # actor grad stats (before step)
-                actor_gn = _grad_global_norm(self.net.actor_parameters())
+                # actor_gn = _grad_global_norm(self.net.actor_parameters())
                 self.actor_opt.step()
 
             # carry hidden; target soft updates
