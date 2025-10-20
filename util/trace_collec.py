@@ -11,6 +11,58 @@ Descriptor = Dict[str, DescriptorEntry]
 
 # ---------- Unchanged public helper ----------
 
+from typing import Iterable
+
+def _is_ipv4(s: str) -> bool:
+    parts = s.split(".")
+    if len(parts) != 4: 
+        return False
+    try:
+        return all(0 <= int(p) <= 255 and str(int(p)) == p for p in parts)
+    except ValueError:
+        return False
+
+def _ip_key(ip: str) -> tuple[int, int, int, int]:
+    a, b, c, d = (int(x) for x in ip.split("."))
+    return (a, b, c, d)
+
+def _all_digit_keys(keys: Iterable[str]) -> bool:
+    try:
+        return all(str(int(k)) == k for k in keys)
+    except Exception:
+        return False
+
+def _deep_sort_mappings(node: Any) -> Any:
+    """
+    Recursively sort mappings where it makes sense:
+      - IPv4 keys -> numeric IP order
+      - all-digit keys -> numeric order
+    Keep other mappings’ key order unchanged.
+    """
+    if isinstance(node, dict):
+        # first, recurse on values
+        processed_items = []
+        for k, v in node.items():
+            processed_items.append((k, _deep_sort_mappings(v)))
+
+        keys = [k for k, _ in processed_items]
+        if keys and all(isinstance(k, str) for k in keys):
+            if all(_is_ipv4(k) for k in keys):
+                processed_items.sort(key=lambda kv: _ip_key(kv[0]))
+            elif _all_digit_keys(keys):
+                processed_items.sort(key=lambda kv: int(kv[0]))
+            # else: keep original order
+
+        # rebuild dict preserving the (possibly new) order
+        return {k: v for k, v in processed_items}
+
+    elif isinstance(node, list):
+        return [_deep_sort_mappings(x) for x in node]
+
+    else:
+        return node
+
+
 def flatten_leaves(struct: Any) -> List[float]:
     """Recursively collect all leaf values (numbers) from a nested dict/list structure."""
     leaves: List[float] = []
@@ -338,7 +390,10 @@ def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]
 
     # Merge and apply top-level stable order once
     merged = {**filtered_trace, **copied_trace}
-    return _sort_top_level_keys_fast(merged, plan)
+    top_sorted = _sort_top_level_keys_fast(merged, plan)
+
+    # Deterministic deep sort for nested mappings (IPs, digit keys)
+    return _deep_sort_mappings(top_sorted)
 
 def shift_res_action_in_states(
     states: List[Dict[str, Any]],
@@ -423,32 +478,37 @@ if __name__ == "__main__":
         "app_buff":   {"rule": True, "pos": "agent"},
         "frame_count":{"rule": True, "pos": "agent"},
         "queues":     {"rule": "queues_only_ac1", "pos": "agent"},
-        "rtt":        {"rule": True, "pos": "flow", "copied": "rnn"},
-        "outage_rate":{"rule": True, "pos": "flow", "copied": "rnn"},
-        "res.action":     {"rule": True, "pos": "flow", "copied": "rnn"},
+        "rtt":        {"rule": True, "pos": "flow"},
+        "outage_rate":{"rule": True, "pos": "flow"},
+        "res.action":     {"rule": True, "pos": "flow"},
     }
 
     example_js_str = '''
-    {"t": 1760702113.036341, "iteration": 0, "links": ["6203@128"], "action": {"6203@128": {"__class__": "ControlCmd", "__data__": {"policy_parameters": {"__class__": "C_LIST_FLOAT_DIM4_0_500", "__data__": [16.354024410247803, 40.01936316490173, 498.2471615076065, 107.10836946964264]}, "version": {"__class__": "C_INT_RANGE_0_13", "__data__": 11}}}}, "stats": {"flow_stat": {"6203@128": {"rtt": 0.0048943062623341875, "outage_rate": 0.004726814726988474, "throughput": 7.396829444090822, "throttle": 0.0, "bitrate": 2000000, "app_buff": 0, "frame_count": 0}}, "device_stat": {"taken_at": {"secs_since_epoch": 1760702113, "nanos_since_epoch": 30374143}, "queues": {"192.168.3.35": {"1": 3, "0": 0, "2": 0}, "192.168.3.25": {"0": 0, "1": 0, "2": 0}}, "link": {"192.168.3.35": {"bssid": "82:19:55:0e:6f:52", "ssid": "HUAWEI-Dual-AP_5G", "freq_mhz": 5745, "signal_dbm": -50, "tx_mbit_s": 867.0}, "192.168.3.25": {"bssid": "82:19:55:0e:6f:4e", "ssid": "HUAWEI-Dual-AP", "freq_mhz": 2462, "signal_dbm": -57, "tx_mbit_s": 174.0}}}}, "timed_out": false, "res": {"action": [-0.9345839023590088, -0.8399225473403931, 0.992988646030426, -0.5715665221214294, 0.7499494552612305], "log_prob": [-18.429311752319336], "value": 0}, "policy": "SAC"}
+    {"t": 1760702113.036341, "iteration": 0, "links": ["6203@128"], "action": {"6203@128": {"__class__": "ControlCmd", "__data__": {"policy_parameters": {"__class__": "C_LIST_FLOAT_DIM4_0_500", "__data__": [16.354024410247803, 40.01936316490173, 498.2471615076065, 107.10836946964264]}, "version": {"__class__": "C_INT_RANGE_0_13", "__data__": 11}}}}, "stats": {"flow_stat": {"6203@128": {"rtt": 0.0048943062623341875, "outage_rate": 0.004726814726988474, "throughput": 7.396829444090822, "throttle": 0.0, "bitrate": 2000000, "app_buff": 0, "frame_count": 0}}, "device_stat": {"taken_at": {"secs_since_epoch": 1760702113, "nanos_since_epoch": 30374143}, "queues": {"192.168.3.25": {"1": 3, "0": 0, "2": 0}, "192.168.3.35": {"0": 0, "1": 0, "2": 0}}, "link": {"192.168.3.35": {"bssid": "82:19:55:0e:6f:52", "ssid": "HUAWEI-Dual-AP_5G", "freq_mhz": 5745, "signal_dbm": -50, "tx_mbit_s": 867.0}, "192.168.3.25": {"bssid": "82:19:55:0e:6f:4e", "ssid": "HUAWEI-Dual-AP", "freq_mhz": 2462, "signal_dbm": -57, "tx_mbit_s": 174.0}}}}, "timed_out": false, "policy": "SAC"}
     '''
-    example_js = trace_filter(json.loads(example_js_str.replace("'", '"')), STATE_DESCRIPTOR)
     
+    example_js_str2 = '''
+    {"t": 1760702113.036341, "iteration": 0, "links": ["6203@128"], "action": {"6203@128": {"__class__": "ControlCmd", "__data__": {"policy_parameters": {"__class__": "C_LIST_FLOAT_DIM4_0_500", "__data__": [16.354024410247803, 40.01936316490173, 498.2471615076065, 107.10836946964264]}, "version": {"__class__": "C_INT_RANGE_0_13", "__data__": 11}}}}, "stats": {"flow_stat": {"6203@128": {"rtt": 0.0048943062623341875, "outage_rate": 0.004726814726988474, "throughput": 7.396829444090822, "throttle": 0.0, "bitrate": 2000000, "app_buff": 0, "frame_count": 0}}, "device_stat": {"taken_at": {"secs_since_epoch": 1760702113, "nanos_since_epoch": 30374143}, "queues": {"192.168.3.35": {"1": 3, "0": 0, "2": 0}, "192.168.3.25": {"0": 0, "1": 0, "2": 0}}, "link": {"192.168.3.25": {"bssid": "82:19:55:0e:6f:52", "ssid": "HUAWEI-Dual-AP_5G", "freq_mhz": 5745, "signal_dbm": -50, "tx_mbit_s": 867.0}, "192.168.3.35": {"bssid": "82:19:55:0e:6f:4e", "ssid": "HUAWEI-Dual-AP", "freq_mhz": 2462, "signal_dbm": -57, "tx_mbit_s": 174.0}}}}, "timed_out": false, "policy": "SAC"}
+    '''
     
-    print(example_js)
-    print(flatten_leaves(example_js))
-    
-    
-    example_js_str_2 = '''
+    example_js_str3 = '''
     {"t": 1760690575.639269, "iteration": 2, "links": ["6203@128"], "action": {"6203@128": {"__class__": "ControlCmd", "__data__": {"policy_parameters": {"__class__": "C_LIST_FLOAT_DIM4_0_500", "__data__": [441.0734474658966, 57.915568351745605, 17.910495400428772, 477.911114692688]}, "version": {"__class__": "C_INT_RANGE_0_13", "__data__": 12}}}}, "stats": {"flow_stat": {"6203@128": {"rtt": 0.004517078399658203, "outage_rate": 0.0, "throughput": 7.753064995008742, "throttle": 0.0, "bitrate": 2000000, "app_buff": 0, "frame_count": 0}}, "device_stat": {"taken_at": {"secs_since_epoch": 1760690575, "nanos_since_epoch": 638260169}, "queues": {"192.168.3.35": {"1": 0, "0": 0, "2": 0}, "192.168.3.25": {"2": 0, "0": 0, "1": 0}}, "link": {"192.168.3.25": {"bssid": "82:19:55:0e:6f:4e", "ssid": "HUAWEI-Dual-AP", "freq_mhz": 2462, "signal_dbm": -58, "tx_mbit_s": 174.0}, "192.168.3.35": {"bssid": "82:19:55:0e:6f:52", "ssid": "HUAWEI-Dual-AP_5G", "freq_mhz": 5745, "signal_dbm": -50, "tx_mbit_s": 867.0}}}}, "timed_out": false, "res": {"action": [0.7642937898635864, -0.7683377265930176, -0.9283580183982849, 0.911644458770752, 0.8903278708457947], "log_prob": [-16.09775161743164], "value": 0}, "policy": "SAC"}
     '''
-    states = [ trace_filter(json.loads(example_js_str.replace("'", '"')), STATE_DESCRIPTOR),  trace_filter(json.loads(example_js_str_2.replace("'", '"')), STATE_DESCRIPTOR)]
     
-    import copy
+    print(trace_filter(json.loads(example_js_str.replace("'", '"')), STATE_DESCRIPTOR))
+    print(trace_filter(json.loads(example_js_str2.replace("'", '"')), STATE_DESCRIPTOR))
+    print(trace_filter(json.loads(example_js_str3.replace("'", '"')), STATE_DESCRIPTOR))
     
-    test_state = copy.deepcopy(states[1])
-    test = shift_res_action_in_states(states, path=("rnn", "res", "action"))[1]
     
-    print(test)
-    print(test_state)
-    print(states[1])
+
+    # states = [ trace_filter(json.loads(example_js_str.replace("'", '"')), STATE_DESCRIPTOR),  trace_filter(json.loads(example_js_str_2.replace("'", '"')), STATE_DESCRIPTOR)]
+    
+    # import copy
+    
+    # test_state = copy.deepcopy(states[1])
+    # test = shift_res_action_in_states(states, path=("rnn", "res", "action"))[1]
+    
+    # print(test)
+    # print(test_state)
+    # print(states[1])
     
