@@ -116,9 +116,6 @@ class SACRNNPri(PolicyBase):
 
             if self._epoch_h is None:
                 self._epoch_h = self.net.init_hidden(obs.size(0), self.device)
-                
-            if self._epoch_h.size(0) != obs.size(0):
-                self._epoch_h = self.net.init_hidden(obs.size(0), self.device)
 
             # encode once
             feat_t, h_tp1 = self.net.encode(obs, self._epoch_h)
@@ -146,7 +143,7 @@ class SACRNNPri(PolicyBase):
             c_loss.backward()
 
             # critic grad stats (before step)
-            critic_gn = th.nn.utils.clip_grad_norm_(self.net.critic_parameters(), 1.0)
+            critic_gn = th.nn.utils.clip_grad_norm_(self.net.critic_parameters(), 10.0)
             self.critic_opt.step()
 
             # actor step: heads only; critics frozen; FE detached
@@ -158,7 +155,7 @@ class SACRNNPri(PolicyBase):
                 a_loss.backward()
 
                 # actor grad stats (before step)
-                actor_gn = th.nn.utils.clip_grad_norm_(self.net.actor_parameters(), 1.0)
+                actor_gn = th.nn.utils.clip_grad_norm_(self.net.actor_parameters(), 5.0)
                 self.actor_opt.step()
 
             # carry hidden; target soft updates
@@ -194,14 +191,6 @@ class SACRNNPri(PolicyBase):
             self.buf.update_episode_losses(info["ep_ids"], c_loss.item())
 
             self._global_step += 1
-            
-            # Check if any done is 1, indicating that this episode is finished
-            reset_h = done.view(-1).bool()  # Convert done to a boolean tensor to select resets
-
-            # Reset hidden states corresponding to done == 1
-            for i in range(len(reset_h)):
-                if reset_h[i]:
-                    self._epoch_h[i] = self.net.init_hidden(1, self.device)[0]
             
 
         # epoch-end aggregates

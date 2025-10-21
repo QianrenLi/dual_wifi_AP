@@ -184,8 +184,8 @@ class RNNPriReplayBuffer:
             next_obs_np = np.zeros((1, obs_np.shape[1]), dtype=np.float32)
 
         done_np = np.array([float(network_output[t].get("done", 0)) for t in range(T)], dtype=np.float32)
-        # if enforce_last_done:
-        #     done_np[-1] = 1.0
+        if enforce_last_done:
+            done_np[-1] = 1.0
 
         eid = self._alloc_eid()
         ep = Episode(eid, obs_np, act_np, rew_np, next_obs_np, done_np, self.device, init_loss=100.0 if init_loss is None else float(init_loss))
@@ -242,19 +242,19 @@ class RNNPriReplayBuffer:
         while any(ep.load_t < ep.length for ep in active_episodes):
             O, A, R, NO, D = [], [], [], [], []
 
-            for ep in active_episodes:
-                try:
+            try:
+                for ep in active_episodes:
                     o, a, r, no, d = ep.load()  # each is [1, 1, dim]
                     O.append(o)   # list of [1, 1, dim]
                     A.append(a)
                     R.append(r)
                     NO.append(no)
                     D.append(d)
-                except StopIteration:
-                    pass
-
-            if not O:
+            except StopIteration:
                 break
+
+            # if not O:
+            #     break
 
             # concat over batch dimension => [B, 1, ...]
             obs_b      = th.cat(O,  dim=0)  # [B, 1, obs_dim]
