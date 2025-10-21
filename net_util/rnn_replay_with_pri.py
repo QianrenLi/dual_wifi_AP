@@ -46,6 +46,16 @@ class Episode:
 
     def reset_cursor(self):
         self.load_t = 0
+        T = self.length
+        if T <= 1:
+            return
+        perm = th.randperm(T, device=self.obs.device)
+        # index_select keeps device/dtype and is fast
+        self.obs      = self.obs.index_select(0, perm)
+        self.actions  = self.actions.index_select(0, perm)
+        self.rewards  = self.rewards.index_select(0, perm)
+        self.next_obs = self.next_obs.index_select(0, perm)
+        
 
     def load(self):
         """Return one (o, a, r, no, d) at current cursor and advance; each with time axis [1, ...]."""
@@ -174,8 +184,8 @@ class RNNPriReplayBuffer:
             next_obs_np = np.zeros((1, obs_np.shape[1]), dtype=np.float32)
 
         done_np = np.array([float(network_output[t].get("done", 0)) for t in range(T)], dtype=np.float32)
-        if enforce_last_done:
-            done_np[-1] = 1.0
+        # if enforce_last_done:
+        #     done_np[-1] = 1.0
 
         eid = self._alloc_eid()
         ep = Episode(eid, obs_np, act_np, rew_np, next_obs_np, done_np, self.device, init_loss=100.0 if init_loss is None else float(init_loss))
@@ -220,6 +230,9 @@ class RNNPriReplayBuffer:
             selected_idx = idx[:batch_size]
 
         active_episodes: List[Episode] = [self.episodes[i] for i in selected_idx]
+        with open("replay_log.txt", 'a') as f:
+            f.write(str(selected_idx))
+            
         for ep in active_episodes:
             ep.reset_cursor()
 
