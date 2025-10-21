@@ -349,20 +349,20 @@ class RNNPriReplayBuffer2:
                 ep.reset_cursor()
             ep_ids = [ep.id for ep in group]
 
-            while any(ep.load_t < ep.length for ep in group):
+            
+            while True:
                 O, A, R, NO, D = [], [], [], [], []
                 try:
                     for ep in group:
                         o, a, r, no, d = ep.load()  # o:[1,obs], a:[1,act], r:[1], d:[1]
                         O.append(o); A.append(a); R.append(r); NO.append(no); D.append(d)
-                except StopIteration:
+                except Exception as e:
                     break
                     
-
                 obs_b      = th.cat(O,  dim=0)               # [B, obs_dim]
                 act_b      = th.cat(A,  dim=0)               # [B, act_dim]
                 next_obs_b = th.cat(NO, dim=0)               # [B, obs_dim]
                 rew_b      = th.cat(R,  dim=0).unsqueeze(-1) # [B, 1]
                 done_b     = th.cat(D,  dim=0).unsqueeze(-1) # [B, 1]
-
+                
                 yield obs_b, act_b, rew_b, next_obs_b, done_b, {"ep_ids": ep_ids}

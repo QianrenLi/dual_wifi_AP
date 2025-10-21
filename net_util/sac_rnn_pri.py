@@ -113,10 +113,13 @@ class SACRNNPri(PolicyBase):
             rew  = rew.to(self.device).float().view(-1, 1)
             nxt  = nxt.to(self.device).float()
             done = done.to(self.device).float().view(-1, 1)
-
+            
             if self._epoch_h is None:
                 self._epoch_h = self.net.init_hidden(obs.size(0), self.device)
-
+            
+            if self._epoch_h.size(0) != obs.size(0):
+                break
+            
             # encode once
             feat_t, h_tp1 = self.net.encode(obs, self._epoch_h)
 
