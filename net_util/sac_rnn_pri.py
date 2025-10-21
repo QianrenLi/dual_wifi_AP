@@ -125,7 +125,6 @@ class SACRNNPri(PolicyBase):
 
             # one policy sample reused (α + actor)
             a_pi, logp_pi = self.net.sample_from_features(feat_t, detach_feat_for_actor=True)
-
             # α step (α only)
             if self.alpha_opt is not None:
                 ent_loss = -(self.log_alpha * (logp_pi.detach() + self.target_entropy)).mean()
@@ -142,7 +141,9 @@ class SACRNNPri(PolicyBase):
             # critic step: FE + critics
             self.critic_opt.zero_grad()
             q1_pred, q2_pred = self.net.q(feat_t, act)
-            c_loss = F.mse_loss(symlog(q1_pred), symlog(backup)) + F.mse_loss(symlog(q2_pred), symlog(backup))
+            c_loss_batch = 0.5 * (F.mse_loss(symlog(q1_pred), symlog(backup), reduction='none').mean(1) + F.mse_loss(symlog(q2_pred), symlog(backup), reduction='none').mean(1) )
+            
+            c_loss = c_loss_batch.mean()
             c_loss.backward()
 
             # critic grad stats (before step)
@@ -191,8 +192,8 @@ class SACRNNPri(PolicyBase):
             qmin_pi_means.append(qmin_pi.mean().item())
             logp_means.append(logp_pi.mean().item())
 
-            self.buf.update_episode_losses(info["ep_ids"], c_loss.item())
-
+            self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.detach().cpu().numpy())
+            
             self._global_step += 1
             
 

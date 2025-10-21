@@ -126,7 +126,6 @@ def main():
     last_trained_time = time.time()
     while True:
         print("train")
-        print(len(policy.buf.episodes))
         trained = policy.train_per_epoch(epoch, writer=writer)
         print("train_finished")
         _extend_with_new()
