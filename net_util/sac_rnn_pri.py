@@ -8,7 +8,7 @@ import importlib
 import copy
 
 from net_util.base import PolicyBase
-from net_util.rnn_replay_with_pri import RNNPriReplayBuffer
+from net_util.rnn_replay_with_pri_2 import RNNPriReplayBuffer2
 from util.trace_collec import flatten_leaves, shift_res_action_in_states
 from . import register_policy, register_policy_cfg
 from torch.utils.tensorboard import SummaryWriter
@@ -52,7 +52,7 @@ class SACRNNPri_Config:
 @register_policy
 class SACRNNPri(PolicyBase):
     """Replay buffer must yield (obs, act, rew, next_obs, done) minibatches."""
-    def __init__(self, cmd_cls, cfg: SACRNNPri_Config, rollout_buffer: RNNPriReplayBuffer | None = None, device: str | None = None, state_transform_dict = None):
+    def __init__(self, cmd_cls, cfg: SACRNNPri_Config, rollout_buffer: RNNPriReplayBuffer2 | None = None, device: str | None = None, state_transform_dict = None):
         super().__init__(cmd_cls, state_transform_dict = state_transform_dict)
         th.manual_seed(cfg.seed); np.random.seed(cfg.seed)
         self.cfg = cfg
@@ -141,7 +141,9 @@ class SACRNNPri(PolicyBase):
             # critic step: FE + critics
             self.critic_opt.zero_grad()
             q1_pred, q2_pred = self.net.q(feat_t, act)
-            c_loss_batch = 0.5 * (F.mse_loss(symlog(q1_pred), symlog(backup), reduction='none').mean(1) + F.mse_loss(symlog(q2_pred), symlog(backup), reduction='none').mean(1) )
+            
+            diff = (th.stack([q1_pred, q2_pred], 0) - backup) / self.buf.sigma      # [2, B, ...]
+            c_loss_batch = diff.pow(2).mean(dim=(0, 2))
             
             c_loss = c_loss_batch.mean()
             c_loss.backward()
@@ -155,7 +157,7 @@ class SACRNNPri(PolicyBase):
             with self.net.critics_frozen():
                 q1_pi, q2_pi = self.net.q(feat_t.detach(), a_pi)
                 qmin_pi = th.min(q1_pi, q2_pi)
-                a_loss = (alpha * logp_pi - symlog(qmin_pi)).mean()
+                a_loss = (alpha * logp_pi - qmin_pi).mean()
                 a_loss.backward()
 
                 # actor grad stats (before step)

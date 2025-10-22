@@ -39,7 +39,7 @@ class Network(nn.Module):
         self.q1, self.q2 = make_q(), make_q()
         self.q1_t, self.q2_t = make_q(), make_q()
         self._hard_sync()
-        
+                
         self.scale_log_offset = scale_log_offset
 
     def _hard_sync(self):
@@ -51,7 +51,8 @@ class Network(nn.Module):
         return 2 * (th.log(th.tensor(2.0, device=u.device)) - u - F.softplus(-2*u))
 
     def _mean_std(self, feat: th.Tensor):
-        mu = self.mu(feat)
+        norm = feat.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-8)
+        mu = self.mu(feat / norm) # penultimate normalization
         logstd = th.clamp(self.logstd_bias + self.logstd_head(feat), self.log_std_min, self.log_std_max)
         return mu, logstd.exp()
 

@@ -44,8 +44,8 @@ def _tracify(states, actions, rewards, network_output, reward_agg):
 
 # -------- Episode --------
 class Episode:
-    __slots__ = ("id", "obs", "actions", "rewards", "next_obs", "dones", "loss", "load_t")
-    def __init__(self, obs_np, act_np, rew_np, next_obs_np, done_np, device, init_loss: float = 1.0):
+    __slots__ = ("id", "obs", "actions", "rewards", "next_obs", "dones", "loss", "load_t", "avg_rewards", "avg_return")
+    def __init__(self, obs_np, act_np, rew_np, next_obs_np, done_np, device, init_loss: float = 1.0, gamma = 0.99):
         self.obs = th.tensor(obs_np, device=device)
         self.actions = th.tensor(act_np, device=device)
         self.rewards = th.tensor(rew_np, device=device)
@@ -53,6 +53,15 @@ class Episode:
         self.dones = th.tensor(done_np, device=device)
         self.loss = float(init_loss)
         self.load_t = 0
+        
+        self.avg_rewards = np.mean(rew_np)
+        T = rew_np.size
+        G = 0
+        for t in range(T - 1, -1, -1):
+            G = rew_np[t] + gamma * G * (1.0 - done_np[t])
+
+        self.avg_return = G
+        
 
     def __lt__(self, other):
         if not isinstance(other, Episode):
@@ -82,13 +91,17 @@ class Episode:
 # -------- Minimal Two-Tier RNN Replay --------
 @register_buffer
 class RNNPriReplayBuffer2:
-    def __init__(self, device: str = "cuda", recent_capacity: int = 10, top_capacity: int = 300):
+    def __init__(self, device: str = "cuda", recent_capacity: int = 10, top_capacity: int = 300, gamma = 0.99):
         self.device = device
         self.recent_k: List[Episode] = []
         self.heap: List[Episode] = []
         self.recent_capacity = recent_capacity
         self.top_capacity = top_capacity
-        self._next_eid = 0
+        self.gamma = gamma
+        
+        self.buf_sum_reward = 0 
+        self.buf_sum_return = 0
+        self.trace_num = 0
         
     @staticmethod
     def build_from_traces(
@@ -125,13 +138,22 @@ class RNNPriReplayBuffer2:
             device=self.device,
             init_loss=100.0 if init_loss is None else float(init_loss),
         )
+        
+        self.buf_sum_reward += ep.avg_rewards
+        self.buf_sum_return += ep.avg_return ** 2
+        self.trace_num += 1
 
         self.recent_k.append(ep)
         if len(self.recent_k) > self.recent_capacity:
             heapq.heappush(self.heap, self.recent_k.pop(0))
             if len(self.heap) > self.top_capacity:
-                heapq.heappop(self.heap)
+                pop_ep = heapq.heappop(self.heap)
+                self.trace_num -= 1
+                self.buf_sum_reward -= pop_ep.avg_rewards
+                self.buf_sum_return -= pop_ep.avg_return ** 2
 
+        self.sigma = np.sqrt(((self.buf_sum_reward + self.gamma * self.buf_sum_return) / self.trace_num))
+        
     def _id_to_ep(self, i) -> Episode:
         split = len(self.recent_k)
         if i < split:
@@ -172,7 +194,6 @@ class RNNPriReplayBuffer2:
         cands = recent_ids + heap_ids
         for ep_id in cands:
             self._id_to_ep(ep_id).reset_cursor()
-            print(self._id_to_ep(ep_id).loss)
             
         while True:
             O, A, R, NO, D = [], [], [], [], []
