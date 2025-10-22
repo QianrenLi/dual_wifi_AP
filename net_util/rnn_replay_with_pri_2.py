@@ -42,9 +42,33 @@ def _tracify(states, actions, rewards, network_output, reward_agg):
     
     return obs_np, act_np, rew_np, next_obs_np, done_np
 
+def merge(a, b):
+    n_a, mean_a, M2_a = a
+    n_b, mean_b, M2_b = b
+    if n_b == 0: return a
+    if n_a == 0: return b
+    n = n_a + n_b
+    delta = mean_b - mean_a
+    mean = mean_a + delta * (n_b / n)
+    M2 = M2_a + M2_b + delta * delta * (n_a * n_b / n)
+    return (n, mean, M2)
+
+def summarize(xs: np.ndarray):
+    n = xs.size
+    if n == 0:
+        return (0, 0.0, 0.0)
+    mean = float(xs.mean())
+    centered = xs - mean
+    M2 = float(np.dot(centered, centered))
+    return (n, mean, M2)
+
+def var_unbiased(summary):
+    n, _, M2 = summary
+    return M2 / (n - 1) if n > 1 else float("nan")
+
 # -------- Episode --------
 class Episode:
-    __slots__ = ("id", "obs", "actions", "rewards", "next_obs", "dones", "loss", "load_t", "avg_rewards", "avg_return")
+    __slots__ = ("id", "obs", "actions", "rewards", "next_obs", "dones", "loss", "load_t", "reward_summary", "gamma_summary", "avg_return")
     def __init__(self, obs_np, act_np, rew_np, next_obs_np, done_np, device, init_loss: float = 1.0, gamma = 0.99):
         self.obs = th.tensor(obs_np, device=device)
         self.actions = th.tensor(act_np, device=device)
@@ -54,13 +78,15 @@ class Episode:
         self.loss = float(init_loss)
         self.load_t = 0
         
-        self.avg_rewards = np.mean(rew_np)
-        T = rew_np.size
+        self.reward_summary = summarize(rew_np)
+        self.gamma_summary = summarize( (1 - done_np) * gamma )
+        
         G = 0
-        for t in range(T - 1, -1, -1):
+        self.avg_return = 0
+        for t in range(self.reward_summary[0] - 1, -1, -1):
             G = rew_np[t] + gamma * G * (1.0 - done_np[t])
-
-        self.avg_return = G
+            self.avg_return += G ** 2
+        self.avg_return /= self.reward_summary[0]
         
 
     def __lt__(self, other):
@@ -99,9 +125,9 @@ class RNNPriReplayBuffer2:
         self.top_capacity = top_capacity
         self.gamma = gamma
         
-        self.buf_sum_reward = 0 
-        self.buf_sum_return = 0
-        self.trace_num = 0
+        self.reward_summary = (0,0,0)
+        self.gamma_summary = (0,0,0)
+        self.avg_return = 0
         
     @staticmethod
     def build_from_traces(
@@ -139,20 +165,17 @@ class RNNPriReplayBuffer2:
             init_loss=100.0 if init_loss is None else float(init_loss),
         )
         
-        self.buf_sum_reward += ep.avg_rewards
-        self.buf_sum_return += ep.avg_return ** 2
-        self.trace_num += 1
-
+        self.reward_summary = merge(self.reward_summary, ep.reward_summary)
+        self.gamma_summary = merge(self.gamma_summary, ep.gamma_summary) 
+        self.avg_return += (ep.avg_return - self.avg_return) * ( ep.reward_summary[0] / self.reward_summary[0] )
+        
         self.recent_k.append(ep)
         if len(self.recent_k) > self.recent_capacity:
             heapq.heappush(self.heap, self.recent_k.pop(0))
             if len(self.heap) > self.top_capacity:
-                pop_ep = heapq.heappop(self.heap)
-                self.trace_num -= 1
-                self.buf_sum_reward -= pop_ep.avg_rewards
-                self.buf_sum_return -= pop_ep.avg_return ** 2
+                heapq.heappop(self.heap)
 
-        self.sigma = np.sqrt(((self.buf_sum_reward + self.gamma * self.buf_sum_return) / self.trace_num))
+        self.sigma = np.sqrt( var_unbiased(self.reward_summary) + var_unbiased(self.gamma_summary) * self.avg_return )
         
     def _id_to_ep(self, i) -> Episode:
         split = len(self.recent_k)
