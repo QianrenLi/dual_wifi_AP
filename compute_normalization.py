@@ -51,10 +51,10 @@ class DatasetStateNormalizer:
         return S_all
 
     def fit_from_initial(self, poll_interval_sec: float = 1.0) -> None:
-        traces = self.watcher.load_initial_traces()
+        traces, interference_vals = self.watcher.load_initial_traces()
         while traces == []:
             time.sleep(poll_interval_sec)
-            traces = self.watcher.load_initial_traces()
+            traces, interference_vals = self.watcher.load_initial_traces()
         S_all = self._merge_state(traces)
         self.state = self._compute_affine(S_all)
 

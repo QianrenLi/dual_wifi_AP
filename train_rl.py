@@ -70,9 +70,9 @@ def main():
 
     # Trace watcher (single root, recursive *.jsonl)
     watcher = TraceWatcher(args.trace_path, control_cfg, max_step=10)
-    init_traces = watcher.load_initial_traces()
+    init_traces, interference_vals = watcher.load_initial_traces()
     while init_traces == []:
-        init_traces = watcher.load_initial_traces()
+        init_traces, interference_vals = watcher.load_initial_traces()
         time.sleep(1)
     
     # Build buffer
@@ -102,13 +102,14 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     store_path = ckpt_dir / f"{next_id}.pt"
     latest_path = ckpt_dir / f"latest.pt"
+    # policy.load(latest_path, device="cuda")
 
     # TB + training
     writer = SummaryWriter(f"net_util/logs/{cfg_stem}")
     actor_before = _flatten_params(getattr(policy, "net", None))
 
     def _extend_with_new():
-        new_traces = watcher.poll_new_traces()
+        new_traces, interference_vals = watcher.poll_new_traces()
         if new_traces:
             policy.buf.extend(
                 new_traces,

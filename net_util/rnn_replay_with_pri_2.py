@@ -145,7 +145,7 @@ class RNNPriReplayBuffer2:
             buf.add_episode(states, actions, rewards, network_output, reward_agg, init_loss)
         return buf
     
-    def extend(self, traces, reward_agg: str = "sum", init_loss: Optional[float] = None, **_: dict):
+    def extend(self, traces, reward_agg: str = "sum", init_loss: Optional[float] = None, **kwargs: dict):
         for (states, actions, rewards, network_output) in traces:
             self.add_episode(states, actions, rewards, network_output, reward_agg, init_loss)
             

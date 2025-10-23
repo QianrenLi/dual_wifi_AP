@@ -1,4 +1,6 @@
 # util/trace_watcher.py
+import re
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -42,6 +44,8 @@ class TraceWatcher:
                 print(f"[PolicyBase] Failed to load state transform: {e}")
                 self._state_tf = None
 
+        self.id_regex = r'(?<=^IL_)\d+(?=_trial_)'
+        
         # Files we've already processed (absolute paths as strings)
         self._seen: set[str] = set()
         self._init_seen()
@@ -126,6 +130,7 @@ class TraceWatcher:
 
     def _load_units(self, paths: Iterable[Path]) -> List[Tuple[list, list, list, list]]:
         merged: List[Tuple[list, list, list, list]] = []
+        interference_vals = [ re.search(path, self.id_regex).group(1) for path in paths ]
         for tp in paths:
             s, a, r, net = trace_collec(
                 str(tp),
@@ -139,7 +144,7 @@ class TraceWatcher:
             a = [flatten_leaves(x) for x in a]
             r = [flatten_leaves(x) for x in r]
             merged.append((s, a, r, net))
-        return merged
+        return merged, interference_vals
 
     def _resolve_limit(self, local_limit: Optional[int]) -> Optional[int]:
         """Choose per-call limit if provided, else instance default."""
