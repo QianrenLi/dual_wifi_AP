@@ -1,7 +1,7 @@
 # util/trace_watcher.py
-import re
-
 from __future__ import annotations
+
+import re
 
 from pathlib import Path
 from typing import Iterable, List, Tuple, Union, Optional
@@ -130,7 +130,7 @@ class TraceWatcher:
 
     def _load_units(self, paths: Iterable[Path]) -> List[Tuple[list, list, list, list]]:
         merged: List[Tuple[list, list, list, list]] = []
-        interference_vals = [ re.search(path, self.id_regex).group(1) for path in paths ]
+        interference_vals = [ int(re.search(self.id_regex, path.parent.stem).group(0)) for path in paths ]
         for tp in paths:
             s, a, r, net = trace_collec(
                 str(tp),

@@ -171,6 +171,8 @@ class SACRNNPri(PolicyBase):
                     tp.data.mul_(1 - self.cfg.tau).add_(sp.data, alpha=self.cfg.tau)
                 for tp, sp in zip(self.net.q2_t.parameters(), self.net.q2.parameters()):
                     tp.data.mul_(1 - self.cfg.tau).add_(sp.data, alpha=self.cfg.tau)
+                for tp, sp in zip(self.net.fe_t.parameters(), self.net.fe.parameters()):
+                    tp.data.mul_(1 - self.cfg.tau).add_(sp.data, alpha=self.cfg.tau)
             self._upd += 1
 
             # ---------- per-batch logging ----------

@@ -9,14 +9,18 @@ import torch.nn.functional as F
 class FeatureExtractor(nn.Module):
     def __init__(self, obs_dim: int, hidden: int):
         super().__init__()
+        self.rnn_hidden = hidden
         self.mlp  = nn.Sequential(nn.Linear(obs_dim, hidden), nn.LayerNorm(hidden), nn.GELU())
-        self.gru  = nn.Sequential(nn.GRUCell(hidden, hidden), nn.LayerNorm(hidden), nn.GELU())
+        self.gru  = nn.GRUCell(hidden, hidden)
+        self.activation = nn.Sequential(nn.LayerNorm(hidden), nn.GELU())
 
     def init_state(self, bsz: int, device=None): return th.zeros(bsz, self.rnn_hidden, device=device)
 
     def forward(self, obs: th.Tensor, h: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
-        mlp = self.mlp(obs); h1 = self.gru(mlp, h)
-        return h1
+        mlp = self.mlp(obs)
+        h1 = self.gru(mlp, h)
+        feat = self.activation(h1)                 # features for heads
+        return feat, h1
     
     
 class Network(nn.Module):
@@ -25,13 +29,14 @@ class Network(nn.Module):
         super().__init__()
         self.log_std_min, self.log_std_max = float(log_std_min), float(log_std_max)
         self.fe = FeatureExtractor(obs_dim, hidden)
+        self.fe_t = FeatureExtractor(obs_dim, hidden)
 
         # Actor
         self.mu = nn.Linear(hidden, act_dim)
         self.logstd_head = nn.Linear(hidden, act_dim)
         self.logstd_bias = nn.Parameter(th.full((act_dim,), init_log_std))
 
-        make_q = lambda: nn.Sequential(nn.Linear(hidden, 1))
+        make_q = lambda: nn.Sequential(nn.Linear(hidden + act_dim, 1))
         self.q1, self.q2 = make_q(), make_q()
         self.q1_t, self.q2_t = make_q(), make_q()
         self._hard_sync()
@@ -53,9 +58,15 @@ class Network(nn.Module):
         return mu, logstd.exp()
 
     # public API used by the trainer
-    def init_hidden(self, bsz: int, device=None): return self.fe.init_state(bsz, device)
+    def init_hidden(self, bsz: int, device=None):
+        return self.fe.init_state(bsz, device)
+
+    def encode(self, obs: th.Tensor, h: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+        return self.fe(obs, h)
     
-    def encode(self, obs: th.Tensor, h: th.Tensor): return self.fe(obs, h)
+
+    def encode_target(self, obs: th.Tensor, h: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+        return self.fe_t(obs, h)
 
     def sample_from_features(self, feat: th.Tensor, detach_feat_for_actor: bool = True):
         x = feat.detach() if detach_feat_for_actor else feat
@@ -75,7 +86,7 @@ class Network(nn.Module):
 
     @th.no_grad()
     def target_backup(self, nxt: th.Tensor, h_tp1: th.Tensor, r: th.Tensor, d: th.Tensor, gamma: float, alpha: th.Tensor):
-        feat_n, _ = self.encode(nxt, h_tp1)
+        feat_n, _ = self.encode_target(nxt, h_tp1)
         mu, std = self._mean_std(feat_n)
         dist = th.distributions.Normal(mu, std)
         u = dist.rsample()

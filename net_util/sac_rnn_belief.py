@@ -20,16 +20,10 @@ def _safe_mean(xs):
 def symlog(x: th.Tensor, eps=1e-12) -> th.Tensor:
     return th.sign(x) * th.log(th.abs(x) + 1.0 + eps)
 
-def _grad_global_norm(params) -> float:
-    total = 0.0
-    for p in params:
-        if p.grad is not None:
-            total += float(p.grad.data.pow(2).sum().item())
-    return float(total ** 0.5)
 
 @register_policy_cfg
 @dataclass
-class SACRNNPri_Config:
+class SACRNNBelief_Config:
     # core
     batch_size: int = 256
     learning_starts: int = 2_000
@@ -46,12 +40,13 @@ class SACRNNPri_Config:
     # fields referenced below
     seed: int = 0
     obs_dim: int = 6
+    belief_dim: int = 1
     network_module_path: str = "net_util.model.sac_rnn_belief"
 
 @register_policy
-class SACRNNPri(PolicyBase):
+class SACRNNBelief(PolicyBase):
     """Replay buffer must yield (obs, act, rew, next_obs, done) minibatches."""
-    def __init__(self, cmd_cls, cfg: SACRNNPri_Config, rollout_buffer: RNNPriReplayBuffer2 | None = None, device: str | None = None, state_transform_dict = None):
+    def __init__(self, cmd_cls, cfg: SACRNNBelief_Config, rollout_buffer: RNNPriReplayBuffer2 | None = None, device: str | None = None, state_transform_dict = None):
         super().__init__(cmd_cls, state_transform_dict = state_transform_dict)
         th.manual_seed(cfg.seed); np.random.seed(cfg.seed)
         self.cfg = cfg
@@ -60,12 +55,13 @@ class SACRNNPri(PolicyBase):
         # Load network module
         net_mod = importlib.import_module(cfg.network_module_path)
         Network = getattr(net_mod, "Network")
-        self.net = Network(cfg.obs_dim, cfg.act_dim, scale_log_offset=self.cmd_cls.sum_log_scales(), rnn_k = cfg.rnn_dim).to(self.device)
+        self.net = Network(cfg.obs_dim, cfg.act_dim, scale_log_offset=self.cmd_cls.sum_log_scales(), belief_dim = cfg.belief_dim).to(self.device)
         self.buf = rollout_buffer
 
         # optimizers
         self.actor_opt  = th.optim.Adam(self.net.actor_parameters(),  lr=cfg.lr)
         self.critic_opt = th.optim.Adam(self.net.critic_parameters(), lr=cfg.lr)
+        self.belief_opt = th.optim.Adam(self.net.belief_parameteres(), lr=cfg.lr)
 
         # temperature α
         if cfg.ent_coef == "auto":
@@ -82,6 +78,8 @@ class SACRNNPri(PolicyBase):
         self._eval_h = None
         self._global_step = 0
         
+        self.log_int = 50
+        
         self.last_obs = None
 
     def _alpha(self):
@@ -97,30 +95,28 @@ class SACRNNPri(PolicyBase):
             writer = SummaryWriter(log_dir=log_dir)
             local_writer = True
 
-        # buffer stats
-        writer.add_scalar("buffer/ptr", getattr(self.buf, "ptr", 0), epoch)
-        writer.add_scalar("buffer/size", getattr(self.buf, "size", 0), epoch)
-
         # collect epoch aggregates
         actor_losses, critic_losses, ent_losses = [], [], []
         q1_means, q2_means, qmin_pi_means, logp_means = [], [], [], []
 
-        steps, self._epoch_h = 0, None
+        steps, self._epoch_h, self._belief_h, self._belief = 0, None, None, None
         for obs, act, rew, nxt, done, info in self.buf.get_minibatches(self.cfg.batch_size):
             obs  = obs.to(self.device).float()
             act  = act.to(self.device).float()
             rew  = rew.to(self.device).float().view(-1, 1)
             nxt  = nxt.to(self.device).float()
             done = done.to(self.device).float().view(-1, 1)
+            interference = info.get('interference').float().view(-1, 1)
             
             if self._epoch_h is None:
-                self._epoch_h = self.net.init_hidden(obs.size(0), self.device)
+                self._epoch_h, self._belief_h = self.net.init_hidden(obs.size(0), self.device)
+                self._belief = th.zeros(obs.size(0), self.cfg.belief_dim, device = self.device)
             
             if self._epoch_h.size(0) != obs.size(0):
                 break
             
             # encode once
-            feat_t, h_tp1 = self.net.encode(obs, self._epoch_h)
+            feat_t, h_tp1 = self.net.encode(obs, self._belief, self._epoch_h)
 
             # one policy sample reused (α + actor)
             a_pi, logp_pi = self.net.sample_from_features(feat_t, detach_feat_for_actor=True)
@@ -135,7 +131,7 @@ class SACRNNPri(PolicyBase):
 
             # targets at (nxt, h_{t+1})
             with th.no_grad():
-                backup = self.net.target_backup(nxt, h_tp1, rew, done, self.cfg.gamma, alpha)
+                backup = self.net.target_backup(nxt, self._belief, h_tp1, rew, done, self.cfg.gamma, alpha)
 
             # critic step: FE + critics
             self.critic_opt.zero_grad()
@@ -165,25 +161,40 @@ class SACRNNPri(PolicyBase):
 
             # carry hidden; target soft updates
             self._epoch_h = h_tp1.detach()
+            
+            self._belief, self._belief_h = self.net.belief_predict(obs, self._belief_h)
+            resid2 = (interference - self._belief).pow(2)                      # [T,B]
+            const = th.log(th.tensor(2.0 * np.pi, device=self.device, dtype=th.float32))
+            b_loss = 0.5 * (resid2 + const).mean()
+            self.belief_opt.zero_grad(set_to_none=True)
+            b_loss.backward()
+            b_gn = th.nn.utils.clip_grad_norm_(self.net.belief_parameteres(), 5.0)
+            self.belief_opt.step()
+            
+            
+            self._belief = self._belief.detach()
+            self._belief_h = self._belief_h.detach()
+            
             if (self._upd % self.cfg.target_update_interval) == 0:
                 for tp, sp in zip(self.net.q1_t.parameters(), self.net.q1.parameters()):
                     tp.data.mul_(1 - self.cfg.tau).add_(sp.data, alpha=self.cfg.tau)
                 for tp, sp in zip(self.net.q2_t.parameters(), self.net.q2.parameters()):
                     tp.data.mul_(1 - self.cfg.tau).add_(sp.data, alpha=self.cfg.tau)
+                for tp, sp in zip(self.net.fe_t.parameters(), self.net.fe.parameters()):
+                    tp.data.mul_(1 - self.cfg.tau).add_(sp.data, alpha=self.cfg.tau)
             self._upd += 1
 
             # ---------- per-batch logging ----------
-            writer.add_scalar("loss/critic_step", c_loss.item(), self._global_step)
-            writer.add_scalar("loss/actor_step",  a_loss.item(), self._global_step)
-            writer.add_scalar("policy/logp_pi_step", logp_pi.mean().item(), self._global_step)
-            writer.add_scalar("q/q1_pred_mean_step", q1_pred.mean().item(), self._global_step)
-            writer.add_scalar("q/q2_pred_mean_step", q2_pred.mean().item(), self._global_step)
-            writer.add_scalar("q/qmin_pi_step", qmin_pi.mean().item(), self._global_step)
-            writer.add_scalar("grad/critic_global_norm", critic_gn, self._global_step)
-            writer.add_scalar("grad/actor_global_norm",  actor_gn,  self._global_step)
-            # LRs
-            writer.add_scalar("opt/critic_lr", self.critic_opt.param_groups[0]["lr"], self._global_step)
-            writer.add_scalar("opt/actor_lr",  self.actor_opt.param_groups[0]["lr"],  self._global_step)
+            if self._global_step % self.log_int == 0:
+                writer.add_scalar("loss/critic_step", c_loss.item(), self._global_step)
+                writer.add_scalar("loss/actor_step",  a_loss.item(), self._global_step)
+                writer.add_scalar("policy/logp_pi_step", logp_pi.mean().item(), self._global_step)
+                writer.add_scalar("q/q1_pred_mean_step", q1_pred.mean().item(), self._global_step)
+                writer.add_scalar("q/q2_pred_mean_step", q2_pred.mean().item(), self._global_step)
+                writer.add_scalar("q/qmin_pi_step", qmin_pi.mean().item(), self._global_step)
+                writer.add_scalar("grad/critic_global_norm", critic_gn, self._global_step)
+                writer.add_scalar("grad/actor_global_norm",  actor_gn,  self._global_step)
+                writer.add_scalar("loss/belief_loss",  b_loss.item(),  self._global_step)
 
             # aggregates
             actor_losses.append(a_loss.item())
@@ -228,9 +239,10 @@ class SACRNNPri(PolicyBase):
         obs = th.tensor(obs_vec, device=self.device, dtype=th.float32).unsqueeze(0)
 
         if reset_hidden or self._eval_h is None:
-            self._eval_h = self.net.init_hidden(1, self.device)
+            self._eval_h, self._belief_h = self.net.init_hidden(1, self.device)
+            self._belief = th.zeros(1, self.cfg.belief_dim, self.device)
 
-        feat, h_next = self.net.encode(obs, self._eval_h)
+        feat, h_next = self.net.encode(obs, self._belief, self._eval_h)
 
         if is_evaluate:
             mu, _ = self.net._mean_std(feat)
@@ -242,7 +254,11 @@ class SACRNNPri(PolicyBase):
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
 
-        self._eval_h = h_next
+        self._eval_h = h_next.detach()
+        
+        self._belief, self._belief_h = self.net.belief_predict(obs, self._belief_h)
+        self._belief = self._belief.detach()
+        self._belief_h = self._belief_h.detach()
 
         return {
             "action":   action[0].detach().cpu().numpy(),
@@ -256,6 +272,7 @@ class SACRNNPri(PolicyBase):
             'model_state_dict': self.net.state_dict(),
             'actor_opt_state_dict': self.actor_opt.state_dict(),
             'critic_opt_state_dict': self.critic_opt.state_dict(),
+            'belief_opt_state_dict': self.belief_opt.state_dict(),
             'log_alpha': self.log_alpha,  # Save the tensor itself
             'alpha_opt_state_dict': self.alpha_opt.state_dict(),
             'cfg': self.cfg,
@@ -271,6 +288,7 @@ class SACRNNPri(PolicyBase):
         self.net.load_state_dict(checkpoint['model_state_dict'])
         self.actor_opt.load_state_dict(checkpoint['actor_opt_state_dict'])
         self.critic_opt.load_state_dict(checkpoint['critic_opt_state_dict'])
+        self.belief_opt.load_state_dict(checkpoint['belief_opt_state_dict'])
         
         self.log_alpha = checkpoint['log_alpha'].to(device)  # Directly assign the tensor
         self.alpha_opt.load_state_dict(checkpoint['alpha_opt_state_dict'])

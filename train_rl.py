@@ -84,6 +84,7 @@ def main():
         lam=roll_cfg.get("lam"),
         reward_agg=roll_cfg.get("reward_agg", "sum"),
         buffer_max=roll_cfg.get("buffer_max", 10_000_000),
+        interference_vals = interference_vals
     )
 
     # Policy
@@ -118,6 +119,7 @@ def main():
                 advantage_estimator=roll_cfg.get("advantage_estimator"),
                 gamma=roll_cfg.get("gamma"),
                 lam=roll_cfg.get("lam"),
+                interference_vals = interference_vals,
             )
             return True
         return False

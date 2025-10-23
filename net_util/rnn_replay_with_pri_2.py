@@ -68,8 +68,8 @@ def var_unbiased(summary):
 
 # -------- Episode --------
 class Episode:
-    __slots__ = ("id", "obs", "actions", "rewards", "next_obs", "dones", "loss", "load_t", "reward_summary", "gamma_summary", "avg_return")
-    def __init__(self, obs_np, act_np, rew_np, next_obs_np, done_np, device, init_loss: float = 1.0, gamma = 0.99):
+    __slots__ = ("id", "obs", "actions", "rewards", "next_obs", "dones", "loss", "load_t", "reward_summary", "gamma_summary", "avg_return", "interference")
+    def __init__(self, obs_np, act_np, rew_np, next_obs_np, done_np, device, init_loss: float = 1.0, gamma = 0.99, interference = 0):
         self.obs = th.tensor(obs_np, device=device)
         self.actions = th.tensor(act_np, device=device)
         self.rewards = th.tensor(rew_np, device=device)
@@ -87,6 +87,8 @@ class Episode:
             G = rew_np[t] + gamma * G * (1.0 - done_np[t])
             self.avg_return += G ** 2
         self.avg_return /= self.reward_summary[0]
+        
+        self.interference = interference
         
 
     def __lt__(self, other):
@@ -137,17 +139,17 @@ class RNNPriReplayBuffer2:
         recent_capacity: int = 10,
         top_capacity: int = 300,
         init_loss: Optional[float] = None,
-        **_: dict,
+        **kwargs: dict,
     ):
         assert len(traces) >= 1
         buf = RNNPriReplayBuffer2(device=device, recent_capacity=recent_capacity, top_capacity=top_capacity)
-        for (states, actions, rewards, network_output) in traces:
-            buf.add_episode(states, actions, rewards, network_output, reward_agg, init_loss)
+        for (states, actions, rewards, network_output), interference in zip(traces, kwargs.get('interference_vals')):
+            buf.add_episode(states, actions, rewards, network_output, reward_agg, init_loss, interference)
         return buf
     
     def extend(self, traces, reward_agg: str = "sum", init_loss: Optional[float] = None, **kwargs: dict):
-        for (states, actions, rewards, network_output) in traces:
-            self.add_episode(states, actions, rewards, network_output, reward_agg, init_loss)
+        for (states, actions, rewards, network_output), interference in zip(traces, kwargs.get('interference_vals')):
+            self.add_episode(states, actions, rewards, network_output, reward_agg, init_loss, interference)
             
             
     def add_episode(
@@ -158,13 +160,14 @@ class RNNPriReplayBuffer2:
         network_output,
         reward_agg: str = "sum",
         init_loss: Optional[float] = None,
+        interference = 0,
     ):
         ep = Episode(
             *_tracify(states, actions, rewards, network_output, reward_agg),
             device=self.device,
             init_loss=100.0 if init_loss is None else float(init_loss),
+            interference = interference
         )
-        
         self.reward_summary = merge(self.reward_summary, ep.reward_summary)
         self.gamma_summary = merge(self.gamma_summary, ep.gamma_summary) 
         self.avg_return += (ep.avg_return - self.avg_return) * ( ep.reward_summary[0] / self.reward_summary[0] )
@@ -220,11 +223,13 @@ class RNNPriReplayBuffer2:
             
         while True:
             O, A, R, NO, D = [], [], [], [], []
+            interference = []
             try:
                 # if any ep raises StopIteration, abort whole computation immediately
                 for ep_id in cands:
                     o, a, r, no, d = self._id_to_ep(ep_id).load()
                     O.append(o); A.append(a); R.append(r); NO.append(no); D.append(d)
+                    interference.append(self._id_to_ep(ep_id).interference)
             except Exception as e:
                 break  # stop all trace computation
 
@@ -234,5 +239,5 @@ class RNNPriReplayBuffer2:
             next_obs_b = th.cat(NO, dim=0)
             rew_b      = th.cat(R,  dim=0).unsqueeze(-1)
             done_b     = th.cat(D,  dim=0).unsqueeze(-1)
-            yield obs_b, act_b, rew_b, next_obs_b, done_b, {"ep_ids": cands}
+            yield obs_b, act_b, rew_b, next_obs_b, done_b, {"ep_ids": cands, "interference": th.tensor(interference, device=self.device)}
 
