@@ -42,6 +42,7 @@ class SACRNNBelief_Config:
     obs_dim: int = 6
     belief_dim: int = 1
     network_module_path: str = "net_util.model.sac_rnn_belief"
+    load_path = "latest.pt"
 
 @register_policy
 class SACRNNBelief(PolicyBase):
@@ -76,6 +77,8 @@ class SACRNNBelief(PolicyBase):
         self._upd = 0
         self._epoch_h = None
         self._eval_h = None
+        self._belief_h = None
+        self._belief = None
         self._global_step = 0
         
         self.log_int = 50
@@ -223,6 +226,8 @@ class SACRNNBelief(PolicyBase):
             writer.flush(); writer.close()
 
         self._epoch_h = None
+        self._belief_h = None
+        self._belief = None
         return True
 
     @th.no_grad()
@@ -240,7 +245,7 @@ class SACRNNBelief(PolicyBase):
 
         if reset_hidden or self._eval_h is None:
             self._eval_h, self._belief_h = self.net.init_hidden(1, self.device)
-            self._belief = th.zeros(1, self.cfg.belief_dim, self.device)
+            self._belief = th.zeros(1, self.cfg.belief_dim, device = self.device)
 
         feat, h_next = self.net.encode(obs, self._belief, self._eval_h)
 

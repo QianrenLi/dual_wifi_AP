@@ -215,7 +215,8 @@ def main():
         stride=cfg.stride,
     )
     plt.tight_layout()
-    plt.show()
+    # plt.show()
+    plt.savefig("reward.png")
 
 if __name__ == "__main__":
     main()

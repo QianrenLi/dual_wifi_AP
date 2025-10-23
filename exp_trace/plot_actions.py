@@ -158,7 +158,8 @@ def main():
         action_selection=args.selected
     )
     plt.tight_layout()
-    plt.show()
+    # plt.show()
+    plt.savefig("test.png")
 
 if __name__ == "__main__":
     main()

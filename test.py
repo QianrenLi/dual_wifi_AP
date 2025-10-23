@@ -89,9 +89,9 @@ def rel_config_path(path_str: str) -> str:
     return "/".join(parts[1:]) if len(parts) > 1 else parts[0]
 
 
-def now_trial_folder(exp_name: str) -> Path:
+def now_trial_folder(exp_name: str, interference_level: int) -> Path:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    folder = Path(f"exp_trace/{exp_name}/trial_{ts}")
+    folder = Path(f"exp_trace/{exp_name}/IL_{interference_level}_trial_{ts}")
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
@@ -144,15 +144,18 @@ def move_rollout_from_tx(folder: Path, tx_srcs: TxSrcs):
     # original code just renames local file without an explicit sync per tx
     # preserve that behavior
     rollout = Path("logs/agent/rollout.jsonl")
-    if rollout.exists():
-        rollout.rename(folder / "rollout.jsonl")
-    else:
-        # if not present yet, try each tx to ensure it's synced locally first
-        for tx in tx_srcs.keys():
-            Connector(tx).sync_file("logs/agent/rollout.jsonl")
-            if rollout.exists():
-                rollout.rename(folder / "rollout.jsonl")
-                break
+    for tx in tx_srcs.keys():
+        Connector(tx).sync_file("logs/agent/rollout.jsonl")
+        if rollout.exists():
+            rollout.rename(folder / "rollout.jsonl")
+            break
+    
+    # output_log = Path("stream-replay/log/output.log")
+    # for tx in tx_srcs.keys():
+    #     Connector(tx).sync_file("stream-replay/log/output.log")
+    #     if output_log.exists():
+    #         output_log.rename(folder / "output.log")
+    #         break
 
 
 def push_rollout_to_trainer(folder: Path):
@@ -216,6 +219,7 @@ def run_iteration(
     iteration: int,
     traces: List[Path],
     max_traces: int,
+    int_level: int = 0,
 ):
     start_t = time.time()
 
@@ -239,7 +243,7 @@ def run_iteration(
     exp_t = time.time()
 
     # 4) collect artifacts
-    folder = now_trial_folder(exp_name)
+    folder = now_trial_folder(exp_name, interference_level=int_level)
     pull_rtt_logs(folder, tx_flows)
     move_rollout_from_tx(folder, tx_srcs)
     
@@ -304,7 +308,7 @@ def train_loop(
             
         iteration = run_iteration(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
-            duration, exp_name, iteration, traces, max_traces
+            duration, exp_name, iteration, traces, max_traces, int_level=path_id(iteration)
         )
 
 
@@ -316,13 +320,13 @@ def evaluate(
     exp_name: str,
 ):
     # single evaluation pass reusing the same building blocks
-    for path in paths: 
+    for int_level, path in enumerate(paths): 
         print(f"Evaluate config {path}")
         tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
         _ = run_iteration(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
-            duration, exp_name, iteration=0, traces=[], max_traces=1
-        )
+            duration, exp_name, iteration=0, traces=[], max_traces=1, int_level=int_level
+            )
 
 
 def main():
