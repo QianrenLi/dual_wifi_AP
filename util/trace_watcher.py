@@ -98,7 +98,7 @@ class TraceWatcher:
         """
         new_units = self.poll_new_paths(max_step=max_step)
         if not new_units:
-            return []
+            return [], []
         return self._load_units(new_units)
 
     # -----------------------------
