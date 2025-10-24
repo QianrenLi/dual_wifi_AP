@@ -297,46 +297,49 @@ def trace_filter(trace: Any, descriptor: Optional[Descriptor | Mapping[str, Any]
 
     return _deep_sort_mappings(out)  # Only sorts IPv4/digit-keyed dicts; preserves other insertion orders
 
-def shift_res_action_in_states(
-    states: List[Dict[str, Any]],
-    path: Tuple[str, ...] = ("res_action",),
-) -> List[Dict[str, Any]]:
-    """把 states 中 path 指向的向量整体右移 1（首个置零），仅当路径已存在时写入。"""
-    # Getter
-    def _get(d: Dict[str, Any]) -> Tuple[bool, Any]:
-        return _get_by_path(d, path)
 
-    # In-place setter (only if existing)
-    p = path
-    last = p[-1]
-    pre = p[:-1]
-    def _set_if_exists(d: Dict[str, Any], value: Any) -> bool:
-        cur: Any = d
-        for seg in pre:
-            if not isinstance(cur, dict) or seg not in cur or not isinstance(cur[seg], dict):
-                return False
-            cur = cur[seg]
-        if not isinstance(cur, dict) or last not in cur:
-            return False
-        cur[last] = value
-        return True
+def create_obs(
+    state: List,
+    action_dim: int,
+    action: List | None,
+    reward: List,
+):
+    if action is not None:
+        state.extend(action)
+    else:
+        state.extend([0.0] * action_dim)
+    state.extend(reward)
+    return state
+    
+    
+def create_obss(
+    states: List[List],
+    actions: List[List],
+    rewards: List[List],
+) -> List[List]:
+    """
+    Insert previous-step action/reward into each state:
+      s'[t] = [ s[t], a[t-1], r[t-1] ] with a[-1]=0, r[-1]=0.
+    If the state already has reserved tail slots of size action_dim+reward_dim
+    (commonly zeros), they are filled in-place; otherwise the vectors are appended.
 
-    n: Optional[int] = None
-    for s in states:
-        ok, a = _get(s)
-        if ok and isinstance(a, (list, tuple)) and a:
-            n = len(a)
-            break
-    if not n:
-        return states
+    Returns a list of *lists* (flattened obs per step).
+    """
+    if not states:
+        return []
 
-    prev = [0.0] * n
-    for s in states:
-        ok, cur = _get(s)
-        wrote = _set_if_exists(s, list(prev))
-        if wrote and ok and isinstance(cur, (list, tuple)) and len(cur) == n:
-            prev = list(cur)
-    return states
+    T = len(states)
+    assert len(actions) == T and len(rewards) == T, "states/actions/rewards length mismatch"
+
+    action_dim = len(actions[0])
+
+    out: List[List] = []
+    for t in range(T):
+        action = actions[t-1] if t > 0 else None
+        reward = rewards[t]
+        out.append(create_obs(states[t], action_dim, action, reward))
+
+    return out
 
 def trace_collec(
     json_file: str,
@@ -346,13 +349,13 @@ def trace_collec(
     with open(json_file, "r") as f:
         trace_items = [json.loads(line, object_hook=_json_object_hook) for line in f]
 
-    actions = [t.get("res").get("action") for t in trace_items]
-    states  = [trace_filter(t, state_descriptor)  for t in trace_items]
-    rewards = [trace_filter(t, reward_descriptor) for t in trace_items]
+    actions = [flatten_leaves(t.get("res").get("action")) for t in trace_items]
+    states  = [flatten_leaves(trace_filter(t, state_descriptor))  for t in trace_items]
+    rewards = [flatten_leaves(trace_filter(t, reward_descriptor)) for t in trace_items]
     network_output = [t.get("res") for t in trace_items]
 
-    # in-place shift of res.action (+1) inside states
-    states = shift_res_action_in_states(states)
+    states = create_obss(states=states, actions=actions, rewards=rewards)
+
     return states, actions, rewards, network_output
 
 # ============================== Demo ============================= #
@@ -362,32 +365,11 @@ if __name__ == "__main__":
         "signal_dbm": { "rule": True, "name": "signal_dbm", "pos": "agent" },
         "tx_mbit_s":  { "rule": True, "name": "tx_mbit_s",  "pos": "agent" },
 
-        # queues: pass the FULL ip->queues map to the rule
         "queues":     { "rule": "queues_only_ac1", "from": "queues", "pos": "agent" },
-
-        # flow-level stats
         "bitrate":     { "rule": "stat_bitrate", "from": "bitrate", "args": {"alpha": 1e-6}, "pos": "flow" },
         
         "app_buff":    { "rule": True, "from": "app_buff", "pos": "flow" },
         "frame_count": { "rule": True, "from": "frame_count", "pos": "flow" },
-        "rtt":         { "rule": True, "from": "rtt", "pos": "flow" },
-        "outage_rate": { "rule": True, "from": "outage_rate", "pos": "flow" },
-
-        # dotted path example
-        "res_action":  { "rule": True, "from": "res.action", "pos": "flow" , "number": 5},
-        
-        "r_bitrate": {
-            "rule": "bitrate_delta",
-            "from": "bitrate",                 # bare key -> flow["bitrate"]
-            "args": {"alpha": 1e-6, "beta": -1e-6 / 2},
-            "pos": "flow",
-        },
-        "r_outage_rate": {
-            "rule": "scale_outage",
-            "from": "outage_rate",             # bare key -> flow["outage_rate"]
-            "args": {"zeta": -1e3},
-            "pos": "flow",
-        },
     }
     
     REWARD_DESCRIPTOR = {
@@ -405,8 +387,8 @@ if __name__ == "__main__":
         }
     }
     
-    s, a, r, n = trace_collec( '/home/qianren/workspace/dual_wifi_AP/exp_trace/rnn_belief_net_500_v2/IL_3_trial_20251024-115019/rollout.jsonl' ,state_descriptor=STATE_DESCRIPTOR, reward_descriptor=REWARD_DESCRIPTOR)
-    print(s)
+    s, a, r, n = trace_collec( '/home/lassso/workspace/dual_wifi_AP/exp_trace/rnn_belief_net_500_v4/IL_0_trial_20251024-132102/rollout.jsonl' ,state_descriptor=STATE_DESCRIPTOR, reward_descriptor=REWARD_DESCRIPTOR)
+    print(len(s[0]))
     
     #################
     # example_js_str = '''
@@ -432,7 +414,7 @@ if __name__ == "__main__":
     # states = [ trace_filter(json.loads(example_js_str2.replace("'", '"')), STATE_DESCRIPTOR),  trace_filter(json.loads(example_js_str3.replace("'", '"')), STATE_DESCRIPTOR)]
     
     ##################
-    # test = shift_res_action_in_states(states)[0]
+    # test = create_obs(states)[0]
 
 
     #########

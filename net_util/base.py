@@ -44,21 +44,20 @@ class PolicyBase:
         raise NotImplementedError
 
     # --- agent API ---
-    def act(self, obs: Dict[str, Any], is_evaluate: bool = False) -> List[float]:
-        vector = self._pre_act(obs)
-        res = self.tf_act(vector, is_evaluate)
+    def act(self, obs: List, is_evaluate: bool = False) -> List[float]:
+        obs = self._pre_act(obs)
+        res = self.tf_act(obs, is_evaluate)
         safe_res = {str(k): (v.tolist() if hasattr(v, "tolist") else v) for k, v in res.items()}
         return safe_res, list_to_cmd(self.cmd_cls, safe_res['action'])
 
-    def _pre_act(self, obs: Dict[str, Any]) -> List[float]:
+    def _pre_act(self, obs: List) -> List[float]:
         """
         1) Flatten nested obs into a single vector.
         2) If a state transform is configured, normalize it.
         """
-        vec = flatten_leaves(obs)  # -> List[float]
         if self._state_tf is not None:
-            vec = self._state_tf.apply_to_list(vec)
-        return vec
+            obs = self._state_tf.apply_to_list(obs)
+        return obs
 
     def train_per_epoch(self, epoch, writer=None):
         raise NotImplementedError

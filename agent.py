@@ -24,7 +24,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from net_util.base import PolicyBase
 from util.ipc import ipc_control  # noqa: E402
 from util.control_cmd import ControlCmd, _json_default, revive_jsonlike  # noqa: E402
-from util.trace_collec import trace_filter
+from util.trace_collec import trace_filter, flatten_leaves, create_obs
 from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY
 
 # -------------------------
@@ -149,7 +149,7 @@ def ipc_get_statistics(ctrl: ipc_control,
 # -------------------------
 # Main agent loop
 # -------------------------
-def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bool):
+def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eval: bool):
     ensure_dir(cfg.out_dir)
     jsonl_path = cfg.out_dir / "rollout.jsonl"
 
@@ -161,10 +161,7 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
 
     ctrl = ipc_control(cfg.server_ip, cfg.server_port, cfg.local_port, link_name="agent")
 
-    last_res = None
-    default_res = {
-        "action": [0, 0, 0, 0, 0], "log_prob": [0], "value": 0
-    }
+    last_action = [0, 0, 0, 0, 0]
     # Duration control
     first_ok_stats_t: Optional[float] = None
     with open(jsonl_path, "w", encoding="utf-8") as jf:
@@ -198,10 +195,12 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
             if timed_out:
                 continue
             
-            obs_for_policy = {} if timed_out else trace_filter(
-                {'stats': stats, 'res': last_res if last_res is not None else default_res}
-                , state_cfg
-            )
+            current_stats = {'stats': stats}
+            
+            states = flatten_leaves(trace_filter( current_stats, control_config['state_cfg'] ))
+            last_rewards = flatten_leaves(trace_filter( current_stats, control_config['reward_cfg'] ))
+            obs_for_policy = create_obs(states, 0, last_action, last_rewards)
+            
             # 2) Base action + stochastic exploration
             if cfg.default_cmd is not None:
                 control_cmd:ControlCmd = revive_jsonlike(cfg.default_cmd)
@@ -209,10 +208,10 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
             else:
                 try:
                     res, control_cmd = policy.act(obs_for_policy, is_eval)
-                    last_res = res
                 except Exception as e:
                     print(e)
                     continue
+                
             # Build ControlCmd using canonical mapping (pads/trims internally)
             control_body: Dict[str, ControlCmd] = {}
             ## TODO: handle multi-link control
@@ -229,6 +228,9 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, state_cfg: Dict, is_eval: bo
             except OSError as e:
                 print(f"[WARN] send control failed: {e}", file=sys.stderr)
 
+            # 4) store previous action
+            last_action = res['action']
+            
             # 5) Log
             t_now = time.time()
             record = {
@@ -307,13 +309,12 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
             policy.load(policy_load_path, device=policy_cfg['device'])
         except:
             print("Load fail; Fall back to no model")
-    state_cfg = control_config.get('state_cfg', None)    
-    return cfg, policy, state_cfg, args.eval
+    return cfg, policy, control_config, args.eval
     
 def main():
     try:
-        cfg, policy, state_cfg, is_eval = parse_args()
-        run_agent(cfg, policy, state_cfg, is_eval)
+        cfg, policy, control_config, is_eval = parse_args()
+        run_agent(cfg, policy, control_config, is_eval)
     except GracefulExit:
         print("\n[INFO] Caught interrupt, exiting.")
     except KeyboardInterrupt:

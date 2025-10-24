@@ -257,7 +257,7 @@ def run_iteration(
             traces.pop(0)
             
         # 6) pull new model & logs
-        if iteration > 5:
+        if iteration > 2:
             pull_trainer_artifacts(exp_name)
         end_t = time.time()
 
@@ -282,14 +282,16 @@ def train_loop(
     exp_name: str,
 ):
     def path_id(iteration):
-        return (iteration // args.per_exp_trials) % len(paths)
+        # return (iteration // args.per_exp_trials) % len(paths)
+        return random.randint(0, len(paths) - 1)
         
     traces: List[Path] = []
     max_traces = 1
     iteration = 0
     last_iteration = iteration
     
-    path = paths[ path_id(iteration) ]
+    interference_level = path_id(iteration)
+    path = paths[ interference_level ]
     print(f"Train config {path}")
     tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
     
@@ -302,13 +304,14 @@ def train_loop(
     
     while True:
         if iteration % args.per_exp_trials == 0:
-            path = paths[ path_id(iteration) ]
+            interference_level = path_id(iteration)
+            path = paths[ interference_level ]
             print(f"Train config {path}")
             tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
             
         iteration = run_iteration(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
-            duration, exp_name, iteration, traces, max_traces, int_level=path_id(iteration)
+            duration, exp_name, iteration, traces, max_traces, int_level=interference_level
         )
 
 
