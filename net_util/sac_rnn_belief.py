@@ -280,7 +280,6 @@ class SACRNNBelief(PolicyBase):
             'log_alpha': self.log_alpha,  # Save the tensor itself
             'alpha_opt_state_dict': self.alpha_opt.state_dict(),
             'cfg': self.cfg,
-            'epoch_h': self._epoch_h,  # Save the hidden state if required
             'global_step': self._global_step,
         }
         th.save(checkpoint, path)
@@ -298,7 +297,6 @@ class SACRNNBelief(PolicyBase):
         self.alpha_opt.load_state_dict(checkpoint['alpha_opt_state_dict'])
         
         self.cfg = checkpoint['cfg']
-        self._epoch_h = checkpoint['epoch_h']
         self._global_step = checkpoint['global_step']
         self.device = device
         self.net.to(device)
