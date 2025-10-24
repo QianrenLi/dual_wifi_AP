@@ -55,7 +55,7 @@ class SACRNNBelief(PolicyBase):
         # Load network module
         net_mod = importlib.import_module(cfg.network_module_path)
         Network = getattr(net_mod, "Network")
-        self.net = Network(cfg.obs_dim, cfg.act_dim, scale_log_offset=self.cmd_cls.sum_log_scales(), belief_dim = cfg.belief_dim).to(self.device)
+        self.net = Network(cfg.obs_dim, cfg.act_dim, scale_log_offset=0, belief_dim = cfg.belief_dim).to(self.device)
         self.buf = rollout_buffer
 
         # optimizers

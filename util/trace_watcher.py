@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import random
 
 from pathlib import Path
 from typing import Iterable, List, Tuple, Union, Optional
@@ -62,6 +63,7 @@ class TraceWatcher:
         units = self._list_units()
         # Only consider those not yet seen
         candidates = [p for p in units if str(p.resolve()) not in self._seen]
+        random.shuffle(candidates)
         to_load = candidates[:limit] if limit is not None else candidates
 
         # Mark only loaded ones as seen
@@ -84,7 +86,7 @@ class TraceWatcher:
             p_str = str(p.resolve())
             if p_str not in self._seen:
                 new_candidates.append(p)
-
+        random.shuffle(new_candidates)
         to_take = new_candidates[:limit] if limit is not None else new_candidates
 
         # Mark only taken ones as seen
