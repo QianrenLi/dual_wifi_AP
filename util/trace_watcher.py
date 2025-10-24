@@ -143,12 +143,6 @@ class TraceWatcher:
                 state_descriptor=self.control_config.get("state_cfg", None),
                 reward_descriptor=self.control_config.get("reward_cfg", None),
             )
-            if self._state_tf is not None:
-                s = [self._state_tf.apply_to_list(flatten_leaves(x)) for x in s]
-            else:
-                s = [flatten_leaves(x) for x in s]
-            a = [flatten_leaves(x) for x in a]
-            r = [flatten_leaves(x) for x in r]
             merged.append((s, a, r, net))
         return merged, interference_vals
 

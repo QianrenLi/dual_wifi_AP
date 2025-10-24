@@ -92,7 +92,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     control_cfg = json.loads(Path(args.control_config).read_text(encoding="utf-8"))
-    watcher = TraceWatcher(args.trace_path, control_cfg, max_step=30)
+    watcher = TraceWatcher(args.trace_path, control_cfg, max_step=500)
     watcher._state_tf = None
 
     norm = DatasetStateNormalizer(watcher)

@@ -9,7 +9,6 @@ import copy
 
 from net_util.base import PolicyBase
 from net_util.rnn_replay_with_pri_2 import RNNPriReplayBuffer2
-from util.trace_collec import flatten_leaves, shift_res_action_in_states
 from . import register_policy, register_policy_cfg
 from torch.utils.tensorboard import SummaryWriter
 
