@@ -356,6 +356,11 @@ def trace_collec(
 
     states = create_obss(states=states, actions=actions, rewards=rewards)
 
+    states = states[:-1]
+    actions = actions[:-1]
+    rewards = rewards[1:]
+    network_output = network_output[:-1]
+    
     return states, actions, rewards, network_output
 
 # ============================== Demo ============================= #
