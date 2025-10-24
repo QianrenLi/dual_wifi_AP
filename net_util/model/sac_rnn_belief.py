@@ -42,16 +42,24 @@ class Network(nn.Module):
         self.logstd_bias = nn.Parameter(th.full((act_dim,), init_log_std))
         
         # Critic
-        make_q = lambda: nn.Sequential(nn.Linear(hidden + act_dim, 1))
-        self.q1, self.q2 = make_q(), make_q()
-        self.q1_t, self.q2_t = make_q(), make_q()
+        def _make_q():
+            return nn.Sequential(
+                nn.Linear(hidden + act_dim, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 1),
+            )
+        self.q1, self.q2 = _make_q(), _make_q()
+        self.q1_t, self.q2_t = _make_q(), _make_q()
+
         self._hard_sync()
-                
         self.scale_log_offset = scale_log_offset
 
     def _hard_sync(self):
         for t, s in zip(self.q1_t.parameters(), self.q1.parameters()): t.data.copy_(s.data)
         for t, s in zip(self.q2_t.parameters(), self.q2.parameters()): t.data.copy_(s.data)
+        for t, s in zip(self.fe_t.parameters(), self.fe.parameters()): t.data.copy_(s.data)
 
     @staticmethod
     def _tanh_log_det(u: th.Tensor) -> th.Tensor:
@@ -108,12 +116,22 @@ class Network(nn.Module):
         return r + (1 - d) * gamma * (qmin - alpha * logp_n)
 
     @contextlib.contextmanager
-    def critics_frozen(self):
-        flags = [p.requires_grad for p in self.q1.parameters()] + [p.requires_grad for p in self.q2.parameters()]
-        for p in list(self.q1.parameters()) + list(self.q2.parameters()): p.requires_grad_(False)
-        try: yield
+    def critics_frozen(self, freeze_encoder: bool = True):
+        ps = list(self.q1.parameters()) + list(self.q2.parameters())
+        flags = [p.requires_grad for p in ps]
+        for p in ps: p.requires_grad_(False)
+
+        fe_flags = None
+        if freeze_encoder:
+            fe_flags = [p.requires_grad for p in self.fe.parameters()]
+            for p in self.fe.parameters(): p.requires_grad_(False)
+        try:
+            yield
         finally:
-            for p, f in zip(list(self.q1.parameters()) + list(self.q2.parameters()), flags): p.requires_grad_(f)
+            for p, f in zip(ps, flags): p.requires_grad_(f)
+            if freeze_encoder:
+                for p, f in zip(self.fe.parameters(), fe_flags): p.requires_grad_(f)
+
 
     # param groups
     def actor_parameters(self):
