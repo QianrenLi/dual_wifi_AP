@@ -130,7 +130,13 @@ class TraceWatcher:
 
     def _load_units(self, paths: Iterable[Path]) -> List[Tuple[list, list, list, list]]:
         merged: List[Tuple[list, list, list, list]] = []
-        interference_vals = [ int(re.search(self.id_regex, path.parent.stem).group(0)) for path in paths ]
+        interference_vals = [  ]
+        for path in paths:
+            res = re.search(self.id_regex, path.parent.stem)
+            if res is None:
+                interference_vals.append(0)
+            else:
+                interference_vals.append(int(res.group(0)))
         for tp in paths:
             s, a, r, net = trace_collec(
                 str(tp),

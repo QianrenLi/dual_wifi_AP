@@ -61,7 +61,7 @@ class DatasetStateNormalizer:
     def save_state_py(self, outfile: str | Path, meta: Dict | None = None) -> str:
         """
         Write a Python file that defines:
-            STATE_NORMALIZATION = { ... }
+            STATE_TRANSFORM = { ... }
         """
         assert self.state is not None, "Call fit_from_initial() first."
         p = Path(outfile)
@@ -75,7 +75,7 @@ class DatasetStateNormalizer:
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "meta": meta or {},
         }
-        body = "STATE_NORMALIZATION = " + pprint.pformat(data, width=100, compact=False) + "\n"
+        body = "STATE_TRANSFORM = " + pprint.pformat(data, width=100, compact=False) + "\n"
         p.write_text(body, encoding="utf-8")
         return str(p.resolve())
 
@@ -88,7 +88,7 @@ if __name__ == "__main__":
     parser.add_argument("--control_config", required=True)
     parser.add_argument("--trace_path", required=True)
     parser.add_argument("--out", default="state_transform.py",
-                        help="Output .py module that defines STATE_NORMALIZATION")
+                        help="Output .py module that defines STATE_TRANSFORM")
     args = parser.parse_args()
 
     control_cfg = json.loads(Path(args.control_config).read_text(encoding="utf-8"))

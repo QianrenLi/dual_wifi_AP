@@ -174,7 +174,6 @@ class SACRNNBelief(PolicyBase):
             b_gn = th.nn.utils.clip_grad_norm_(self.net.belief_parameteres(), 5.0)
             self.belief_opt.step()
             
-            
             self._belief = self._belief.detach()
             self._belief_h = self._belief_h.detach()
             
