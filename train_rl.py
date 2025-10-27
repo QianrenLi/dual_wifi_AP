@@ -54,7 +54,7 @@ def main():
     ap.add_argument("--trace_path", required=True, help="Root folder to watch; all **/*.jsonl included")
     ap.add_argument("--load_path", default=None)
     ap.add_argument("--delta-min", type=float, default=5e-4)
-    ap.add_argument("--delta-max", type=float, default=0.1)
+    ap.add_argument("--delta-max", type=float, default=5)
     args = ap.parse_args()
 
     with open(args.control_config, "r", encoding="utf-8") as f:
@@ -125,7 +125,7 @@ def main():
         return False
 
     epoch = 0
-    store_int = 30
+    store_int = 1000
     last_trained_time = time.time()
     while True:
         # start_time = time.time()
@@ -134,7 +134,7 @@ def main():
         _extend_with_new()
         
         if not trained:
-            time.sleep(10)
+            time.sleep(30)
             continue
         
         # Actor drift

@@ -209,6 +209,10 @@ class SACRNNBeliefSeq(PolicyBase):
         if not got_any:
             return False
 
+        # reset carried states for next epoch if you prefer
+        self._belief_h = None
+        self._belief = None
+
         # epoch-end aggregates
         writer.add_scalar("loss/actor_epoch",  _safe_mean(actor_losses), epoch)
         writer.add_scalar("loss/critic_epoch", _safe_mean(critic_losses), epoch)
@@ -216,14 +220,15 @@ class SACRNNBeliefSeq(PolicyBase):
         writer.add_scalar("q/q1_mean_epoch", _safe_mean(q1_means), epoch)
         writer.add_scalar("q/q2_mean_epoch", _safe_mean(q2_means), epoch)
         writer.add_scalar("q/qmin_pi_epoch", _safe_mean(qmin_pi_means), epoch)
-        if ent_losses: writer.add_scalar("loss/entropy_epoch", _safe_mean(ent_losses), epoch)
+        if ent_losses: 
+            entropy_ep = _safe_mean(ent_losses)
+            writer.add_scalar("loss/entropy_epoch", entropy_ep, epoch)
+            if entropy_ep >= 0:
+                return False
 
         if local_writer:
             writer.flush(); writer.close()
 
-        # reset carried states for next epoch if you prefer
-        self._belief_h = None
-        self._belief = None
         return True
 
     @th.no_grad()
