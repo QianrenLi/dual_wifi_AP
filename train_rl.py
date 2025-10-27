@@ -128,9 +128,9 @@ def main():
     store_int = 30
     last_trained_time = time.time()
     while True:
-        print("train")
+        start_time = time.time()
         trained = policy.train_per_epoch(epoch, writer=writer)
-        print("train_finished")
+        print(time.time() - start_time)
         _extend_with_new()
         
         if not trained:
