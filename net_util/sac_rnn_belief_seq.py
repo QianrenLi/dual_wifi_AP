@@ -257,7 +257,7 @@ class SACRNNBeliefSeq(PolicyBase):
 
         self._eval_h = h_next.detach()
         
-        self._belief, self._belief_h = self.net.belief_predict(obs, self._belief_h)
+        self._belief, self._belief_h = self.net.belief_predict_step(obs, self._belief_h)
         self._belief = self._belief.detach()
         self._belief_h = self._belief_h.detach()
 
