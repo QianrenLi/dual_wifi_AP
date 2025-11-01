@@ -138,10 +138,7 @@ class Network(nn.Module):
         h0_tgt = self.fe_t.init_state(B, nxt_TBD.device)
 
         # 2) Encode the next sequence with target encoder from zero state
-        feat_n_TBH, _ = self.encode_target_seq(nxt_TBD, belief_TB1, h0_tgt)   # [T,B,H]
-
-        # 3) Be defensive against any accidental NaNs
-        feat_n_TBH = th.nan_to_num(feat_n_TBH, nan=0.0, posinf=1.0, neginf=-1.0)
+        feat_n_TBH, _ = self.encode_target_seq(nxt_TBD, belief_TB1, h_seq_next)   # [T,B,H]
 
         # 4) Actor heads in fp32 (your _mean_std already does fp32 math + clamps)
         mu, std = self._mean_std(feat_n_TBH)
