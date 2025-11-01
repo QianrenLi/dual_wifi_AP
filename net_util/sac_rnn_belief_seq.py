@@ -8,6 +8,7 @@ import importlib
 import copy
 
 from net_util.base import PolicyBase
+from net_util.model.sac_rnn_belief_seq import Network as SAC_RNN_NETWORK
 from net_util.rnn_replay_with_pri_2 import RNNPriReplayBuffer2
 from . import register_policy, register_policy_cfg
 from torch.utils.tensorboard import SummaryWriter
@@ -42,6 +43,8 @@ class SACRNNBeliefSeq_Config:
     belief_dim: int = 1
     network_module_path: str = "net_util.model.sac_rnn_belief"
     load_path = "latest.pt"
+    
+    batch_rl = False
 
 @register_policy
 class SACRNNBeliefSeq(PolicyBase):
@@ -55,22 +58,25 @@ class SACRNNBeliefSeq(PolicyBase):
         # Load network module
         net_mod = importlib.import_module(cfg.network_module_path)
         Network = getattr(net_mod, "Network")
-        self.net = Network(cfg.obs_dim, cfg.act_dim, scale_log_offset=0, belief_dim = cfg.belief_dim).to(self.device)
+        self.net:net = Network(cfg.obs_dim, cfg.act_dim, scale_log_offset=0, belief_dim = cfg.belief_dim).to(self.device) # type: ignore
         self.buf = rollout_buffer
 
         # optimizers
-        self.actor_opt  = th.optim.Adam(self.net.actor_parameters(),  lr=cfg.lr)
+        self.actor_opt  = th.optim.Adam(self.net.actor_parameters(),  lr=cfg.lr * 0.1)
         self.critic_opt = th.optim.Adam(self.net.critic_parameters(), lr=cfg.lr)
         self.belief_opt = th.optim.Adam(self.net.belief_parameteres(), lr=cfg.lr)
 
-        # temperature α
-        if cfg.ent_coef == "auto":
+        # # temperature α
+        if cfg.ent_coef == "auto" and cfg.batch_rl == False:
             self.log_alpha = th.tensor([cfg.ent_coef_init], device=self.device).log().requires_grad_(True)
             self.alpha_opt = th.optim.Adam([self.log_alpha], lr=cfg.lr)
             self.target_entropy = -float(cfg.act_dim) if cfg.target_entropy == "auto" else float(cfg.target_entropy)
         else:
             self.log_alpha, self.alpha_opt = None, None
-            self.alpha_tensor = th.tensor(float(cfg.ent_coef), device=self.device)
+            self.alpha_tensor = th.tensor(float(0.2), device=self.device)
+        
+        # self.log_alpha, self.alpha_opt = None, None
+        # self.alpha_tensor = th.tensor(float(0.2), device=self.device)
 
         # counters / state
         self._upd = 0
@@ -88,7 +94,85 @@ class SACRNNBeliefSeq(PolicyBase):
         return (self.log_alpha.exp() if self.log_alpha is not None else self.alpha_tensor).detach()
 
 
-    def train_per_epoch(self, epoch: int, writer: Optional[SummaryWriter] = None, log_dir: str = "runs/sac_rnn") -> bool:
+    def cdl_loss(
+        self,
+        feat_TBH: th.Tensor,                 # [T,B,H]
+        nxt_TBD: th.Tensor,                  # [T,B,D]
+        belief_seq_TB1_sac: th.Tensor,       # [T,B,1]
+        act_TBA: th.Tensor,                  # [T,B,A]
+        num_random: int = 10,
+        beta_cql: float = 0.05,
+    ) -> Tuple[th.Tensor, Dict[str, th.Tensor]]:
+        device = feat_TBH.device
+        T, B, H = feat_TBH.shape
+        _, _, A = act_TBA.shape
+
+        with th.no_grad():
+            # random actions at s_t
+            a_rand_TBNA = th.rand(T, B, num_random, A, device=device) * 2 - 1
+
+            # π(s_t) actions
+            a_curr_TBA, _ = self.net.sample_from_features(feat_TBH, detach_feat_for_actor=True)
+            a_curr_TBNA = a_curr_TBA.unsqueeze(2).expand(T, B, num_random, A)
+
+            # π(s_{t+1}) actions
+            h0_enc, _ = self.net.init_hidden(B, device)
+            feat_next_TBH, _ = self.net.encode_seq(nxt_TBD, belief_seq_TB1_sac, h0_enc)
+            a_next_TBA, _ = self.net.sample_from_features(feat_next_TBH, detach_feat_for_actor=True)
+            a_next_TBNA = a_next_TBA.unsqueeze(2).expand(T, B, num_random, A)
+
+        def _eval_q(feat_TBH, act_TBNA):
+            T_, B_, N_, A_ = act_TBNA.shape
+            feat_rep = feat_TBH.unsqueeze(2).expand(T_, B_, N_, H).reshape(T_*B_*N_, H)
+            act_rep  = act_TBNA.reshape(T_*B_*N_, A_)
+            q1f, q2f = self.net.q(feat_rep, act_rep)
+            return q1f.view(T_,B_,N_,1), q2f.view(T_,B_,N_,1)
+
+        q1_rand, q2_rand = _eval_q(feat_TBH, a_rand_TBNA)
+        q1_curr, q2_curr = _eval_q(feat_TBH, a_curr_TBNA)
+        q1_next, q2_next = _eval_q(feat_TBH, a_next_TBNA)
+
+        q1_bc, q2_bc = self.net.q(feat_TBH, act_TBA)        # [T,B,1]
+        q1_bc_TB11 = q1_bc.unsqueeze(2)                     # [T,B,1,1]
+        q2_bc_TB11 = q2_bc.unsqueeze(2)
+
+        cat_q1 = th.cat([q1_rand, q1_bc_TB11, q1_next, q1_curr], dim=2)  # [T,B,Ntot,1]
+        cat_q2 = th.cat([q2_rand, q2_bc_TB11, q2_next, q2_curr], dim=2)
+
+        # log-sum-exp over proposals
+        lse1_TB = th.logsumexp(cat_q1.squeeze(-1), dim=2)   # [T,B]
+        lse2_TB = th.logsumexp(cat_q2.squeeze(-1), dim=2)
+
+        # penalties (anchor by data action)
+        cql1 = (lse1_TB.mean() - q1_bc.mean())
+        cql2 = (lse2_TB.mean() - q2_bc.mean())
+        penalty = beta_cql * (cql1 + cql2)
+
+        # stats for logging
+        min_q_rand = th.minimum(q1_rand, q2_rand).mean()
+        min_q_curr = th.minimum(q1_curr, q2_curr).mean()
+        min_q_next = th.minimum(q1_next, q2_next).mean()
+        min_q_bc   = th.minimum(q1_bc,   q2_bc).mean()
+        
+        stats = {
+            "cdl/penalty_total": penalty.detach(),
+            "cdl/cql1": cql1.detach(),
+            "cdl/cql2": cql2.detach(),
+            "cdl/minQ_bc_mean":   min_q_bc.detach(),
+            "cdl/minQ_rand_mean": min_q_rand.detach(),
+            "cdl/minQ_curr_mean": min_q_curr.detach(),
+            "cdl/minQ_next_mean": min_q_next.detach(),
+            "cdl/gap_rand_bc": (min_q_rand - min_q_bc).detach(),
+            "cdl/gap_curr_bc": (min_q_curr - min_q_bc).detach(),
+            "cdl/gap_next_bc": (min_q_next - min_q_bc).detach(),
+            "cdl/std_cat_q1": cat_q1.squeeze(-1).std(dim=2).mean().detach(),
+            "cdl/std_cat_q2": cat_q2.squeeze(-1).std(dim=2).mean().detach(),
+        }
+        
+        return penalty, stats
+
+
+    def train_per_epoch(self, epoch: int, writer: Optional[SummaryWriter] = None, log_dir: str = "runs/sac_rnn", is_batch_rl = False) -> bool:
         th.backends.cudnn.benchmark = True
         use_cuda_amp = False
         scaler = th.amp.GradScaler('cuda', enabled=use_cuda_amp)
@@ -102,7 +186,7 @@ class SACRNNBeliefSeq(PolicyBase):
 
         # One pass per sequence batch
         got_any = False
-        for batch in self.buf.get_sequences(self.cfg.batch_size, trace_length=100, device=self.device):
+        for batch in self.buf.get_sequences(self.cfg.batch_size, trace_length=50, device=self.device):
             got_any = True
             obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch  # time-major
             T, B, _ = obs_TBD.shape
@@ -130,7 +214,6 @@ class SACRNNBeliefSeq(PolicyBase):
             with th.autocast(device_type='cuda', enabled=use_cuda_amp):
                 feat_TBH, hT = self.net.encode_seq(obs_TBD, belief_seq_TB1_sac, h0)  # use detached belief
                 a_pi_TBA, logp_TB1 = self.net.sample_from_features(feat_TBH)
-
                 if self.alpha_opt is not None:
                     ent_loss = -(self.log_alpha * (logp_TB1.detach() + self.target_entropy)).mean()
                 else:
@@ -141,13 +224,25 @@ class SACRNNBeliefSeq(PolicyBase):
                     backup_TB1 = self.net.target_backup_seq(
                         nxt_TBD, belief_seq_TB1_sac, hT, rew_TB1, done_TB1, self.cfg.gamma, alpha
                     )
-                q1_TB1, q2_TB1 = self.net.q(feat_TBH, act_TBA)
+                q1_TB1, q2_TB1 = self.net.q(feat_TBH, act_TBA)  
                 diff = th.stack([q1_TB1, q2_TB1], dim=0) - backup_TB1
                 diff = diff / self.buf.sigma
                 c_loss_per_t = diff.pow(2).mean(dim=0)          # [T,B,1]
                 c_loss_batch = c_loss_per_t.mean(dim=(0,2))     # [B]
                 c_loss = c_loss_batch.mean()
-
+                
+                if is_batch_rl:
+                    critic_td_only = c_loss.detach()
+                    cdl_penalty, cdl_stats = self.cdl_loss(
+                        feat_TBH        = feat_TBH,
+                        nxt_TBD         = nxt_TBD,
+                        belief_seq_TB1_sac = belief_seq_TB1_sac,
+                        act_TBA         = act_TBA,
+                        num_random      = 10,
+                        beta_cql        = 5 * 20 / self.buf.sigma,
+                    )
+                    c_loss = c_loss + cdl_penalty
+                
             # ---- Optimize (same order is fine now; graphs disjoint) ----
             self.critic_opt.zero_grad(set_to_none=True)
             scaler.scale(c_loss).backward()
@@ -160,6 +255,7 @@ class SACRNNBeliefSeq(PolicyBase):
                     q1_pi, q2_pi = self.net.q(feat_TBH.detach(), a_pi_TBA)
                     qmin_pi = th.min(q1_pi, q2_pi)
                     a_loss = (alpha * logp_TB1 - qmin_pi).mean()
+                    
             scaler.scale(a_loss).backward()
             actor_gn = th.nn.utils.clip_grad_norm_(self.net.actor_parameters(), 5.0)
             scaler.step(self.actor_opt)
@@ -187,7 +283,13 @@ class SACRNNBeliefSeq(PolicyBase):
                     for tp, sp in zip(self.net.fe_t.parameters(), self.net.fe.parameters()):
                         tp.mul_(1 - tau).add_(sp, alpha=tau)
             self._upd += 1
-
+            
+            if is_batch_rl:
+                for k, v in cdl_stats.items():
+                    writer.add_scalar(k, v.item(), self._upd)
+                writer.add_scalar("loss/critic_td_only", critic_td_only.item(), self._upd)
+                writer.add_scalar("loss/critic_total",   c_loss.detach().item(), self._upd)
+                
             # aggregates
             actor_losses.append(a_loss.item())
             critic_losses.append(c_loss.item())
@@ -197,8 +299,8 @@ class SACRNNBeliefSeq(PolicyBase):
             logp_means.append(logp_TB1.mean().item())
             if self.alpha_opt is not None: ent_losses.append(ent_loss.item())
 
-            # update priorities using per-episode loss
-            self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.detach().cpu().numpy())
+            ## update priorities using per-episode loss
+            # self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.detach().cpu().numpy())
 
             # carry belief hidden for next batch
             self._belief_h = self.net.belief_rnn.init_state(B, self.device)
@@ -216,6 +318,7 @@ class SACRNNBeliefSeq(PolicyBase):
         # epoch-end aggregates
         writer.add_scalar("loss/actor_epoch",  _safe_mean(actor_losses), epoch)
         writer.add_scalar("loss/critic_epoch", _safe_mean(critic_losses), epoch)
+        writer.add_scalar("loss/b_loss", b_loss.item(), epoch)
         writer.add_scalar("policy/logp_pi_epoch", _safe_mean(logp_means), epoch)
         writer.add_scalar("q/q1_mean_epoch", _safe_mean(q1_means), epoch)
         writer.add_scalar("q/q2_mean_epoch", _safe_mean(q2_means), epoch)
@@ -223,8 +326,6 @@ class SACRNNBeliefSeq(PolicyBase):
         if ent_losses: 
             entropy_ep = _safe_mean(ent_losses)
             writer.add_scalar("loss/entropy_epoch", entropy_ep, epoch)
-            if entropy_ep >= 0:
-                return False
 
         if local_writer:
             writer.flush(); writer.close()
@@ -269,7 +370,8 @@ class SACRNNBeliefSeq(PolicyBase):
         return {
             "action":   action[0].detach().cpu().numpy(),
             "log_prob": logp[0].detach().cpu().numpy(),
-            "value":    v_like
+            "value":    v_like,
+            "belief":   self._belief[0].detach().cpu().numpy(),
         }
         
     def save(self, path: str):
@@ -280,7 +382,7 @@ class SACRNNBeliefSeq(PolicyBase):
             'critic_opt_state_dict': self.critic_opt.state_dict(),
             'belief_opt_state_dict': self.belief_opt.state_dict(),
             'log_alpha': self.log_alpha,  # Save the tensor itself
-            'alpha_opt_state_dict': self.alpha_opt.state_dict(),
+            'alpha_opt_state_dict': self.alpha_opt.state_dict() if self.alpha_opt else self.alpha_opt,
             'cfg': self.cfg,
             'global_step': self._global_step,
         }
@@ -296,7 +398,8 @@ class SACRNNBeliefSeq(PolicyBase):
         self.belief_opt.load_state_dict(checkpoint['belief_opt_state_dict'])
         
         self.log_alpha = checkpoint['log_alpha'].to(device)  # Directly assign the tensor
-        self.alpha_opt.load_state_dict(checkpoint['alpha_opt_state_dict'])
+        if self.alpha_opt:
+            self.alpha_opt.load_state_dict(checkpoint['alpha_opt_state_dict'])
         
         self.cfg = checkpoint['cfg']
         self._global_step = checkpoint['global_step']
