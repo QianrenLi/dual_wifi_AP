@@ -397,8 +397,10 @@ class SACRNNBeliefSeq(PolicyBase):
         self.critic_opt.load_state_dict(checkpoint['critic_opt_state_dict'])
         self.belief_opt.load_state_dict(checkpoint['belief_opt_state_dict'])
         
-        self.log_alpha = checkpoint['log_alpha'].to(device)  # Directly assign the tensor
-        if self.alpha_opt:
+        if 'log_alpha' in checkpoint:
+            self.log_alpha = checkpoint['log_alpha'].to(device)  # Directly assign the tensor
+
+        if 'alpha_opt_state_dict' in checkpoint:
             self.alpha_opt.load_state_dict(checkpoint['alpha_opt_state_dict'])
         
         self.cfg = checkpoint['cfg']
