@@ -154,7 +154,7 @@ class C_INT_RANGE_0_13_TypeII(CIntTypeII):
 @dataclass
 class ControlCmd:
     policy_parameters: C_LIST_FLOAT_DIM4_0_500
-    version: C_INT_RANGE_0_13
+    version: C_INT_RANGE_0_13_TypeII
     
     @staticmethod
     def __dim__():
