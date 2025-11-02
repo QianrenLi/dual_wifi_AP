@@ -314,6 +314,9 @@ class SACRNNBeliefSeq(PolicyBase):
         # reset carried states for next epoch if you prefer
         self._belief_h = None
         self._belief = None
+        
+        if self._upd % self.buf.data_num >= 4:
+            return False
 
         # epoch-end aggregates
         writer.add_scalar("loss/actor_epoch",  _safe_mean(actor_losses), epoch)
