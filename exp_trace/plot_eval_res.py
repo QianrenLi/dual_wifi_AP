@@ -164,7 +164,7 @@ def plot_channel_box(ch_distributions, folder_names, title=None, out_path=None, 
     return ax
 
 
-def plot_reward_bar(reward_totals, folder_names, title=None, out_path=None):
+def plot_reward_bar(reward_totals, folder_names, title=None, out_path=None, ylabel = None):
     """
     Bar plot for per-folder total rewards.
 
@@ -184,13 +184,42 @@ def plot_reward_bar(reward_totals, folder_names, title=None, out_path=None):
     ax : matplotlib.axes.Axes
     """
     fig, ax = plt.subplots()
-    ax.bar(range(len(folder_names)), reward_totals, tick_label=folder_names)
-    ax.set_xlabel("Folder")
-    ax.set_ylabel("Total reward")
+    bars = ax.bar(range(len(folder_names)), reward_totals, tick_label=folder_names,             color="cyan",
+            edgecolor="black",
+            hatch= "//",
+            alpha= 0.9,
+            # width=0.08,
+            linewidth=1.0,
+            zorder=3,)
+    # ax.set_xlabel("Folder")
+    ax.set_ylabel(ylabel, fontsize=18) if ylabel else ax.set_ylabel("Total reward")
     if title:
         ax.set_title(title)
     plt.xticks(rotation=30, ha="right")
     plt.tight_layout()
+
+    # Add value labels with slight offset
+    for rect in bars:
+        height = rect.get_height()
+        ax.text(
+            rect.get_x() + rect.get_width() / 2.0,
+            height + 0.01 * max(reward_totals),  # small offset above bar
+            f"{height:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=14,
+            weight="bold",
+        )
+
+    # Make it pretty: subtle grid + clean axes
+    ax.grid(True, axis="y", linestyle="--", alpha=0.4, zorder=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="x", labelsize=14)
+    ax.tick_params(axis="y", labelsize=14)
+    # ax.set_xlim([-0.25, 0.5])
+    # ax.set_ylim(bottom = 9)
+        
     if out_path:
         plt.savefig(out_path, dpi=150)
         plt.close(fig)
@@ -274,6 +303,8 @@ def main():
     folder_names = []
     stats_list = []       # for box plots (channel 0/1)
     reward_totals = []    # for bar plot
+    tputs_totals = []
+    outage_totals = []
 
     for folder in args.folders:
         root = Path(folder)
@@ -283,22 +314,24 @@ def main():
 
         folder_names.append(root.name)
 
-        # Channel stats
-        log_path = root / "output.log"
-        if log_path.exists():
-            try:
-                stats = compute_channel_stats(str(log_path))
-            except Exception as e:
-                print(f"[warn] compute_channel_stats failed for {root}: {e}")
-                stats = {"seq_hist": {}}
-        else:
-            print(f"[warn] No output.log in {root}")
-            stats = {"seq_hist": {}}
-        stats_list.append(stats)
+        # # Channel stats
+        # log_path = root / "output.log"
+        # if log_path.exists():
+        #     try:
+        #         stats = compute_channel_stats(str(log_path))
+        #     except Exception as e:
+        #         print(f"[warn] compute_channel_stats failed for {root}: {e}")
+        #         stats = {"seq_hist": {}}
+        # else:
+        #     print(f"[warn] No output.log in {root}")
+        #     stats = {"seq_hist": {}}
+        # stats_list.append(stats)
 
         # Reward total
         ro_path = _find_rollout(root)
         total_reward = []
+        tput = []
+        outage = []
         if ro_path:
             try:
                 with ro_path.open("r", encoding="utf-8", errors="ignore") as fh:
@@ -311,22 +344,26 @@ def main():
                         except Exception:
                             continue
                         total_reward.append(compute_reward(rec, reward_cfg, agg=args.agg))
+                        tput.append(rec['stats']['flow_stat']['6203@128']['throughput'])
+                        outage.append(rec['stats']['flow_stat']['6203@128']['outage_rate'])
             except Exception as e:
                 print(f"[warn] Failed reading rewards in {root}: {e}")
         else:
             print(f"[warn] No rollout.jsonl/roolout.jsonl in {root}")
         reward_totals.append( np.mean(total_reward) )
+        tputs_totals.append(np.mean(tput))
+        outage_totals.append(np.mean(outage))
 
     # ---- Build channel distributions and plot ----
     ch0_distributions = build_channel_distributions(stats_list, channel=0)
 
-    plot_channel_box(
-        ch_distributions=ch0_distributions,
-        folder_names=folder_names,
-        title="Channel 0 per-seq counts (box)",
-        out_path=str(out_dir / "channel0_box.png"),
-        showfliers=args.showfliers,
-    )
+    # plot_channel_box(
+    #     ch_distributions=ch0_distributions,
+    #     folder_names=folder_names,
+    #     title="Channel 0 per-seq counts (box)",
+    #     out_path=str(out_dir / "channel0_box.png"),
+    #     showfliers=args.showfliers,
+    # )
     # plot_channel_box(
     #     ch_distributions=ch1_distributions,
     #     folder_names=folder_names,
@@ -334,11 +371,29 @@ def main():
     #     out_path=str(out_dir / "channel1_box.png"),
     #     showfliers=args.showfliers,
     # )
+    
     plot_reward_bar(
         reward_totals=reward_totals,
-        folder_names=folder_names,
-        title=f"Total per-record rewards per folder (agg={args.agg})",
-        out_path=str(out_dir / "reward_bar.png"),
+        folder_names=[0,1,2,3],
+        title=f"",
+        out_path=str(out_dir / "reward.png"),
+        ylabel="Average Reward"
+    )
+    
+    plot_reward_bar(
+        reward_totals=tputs_totals,
+        folder_names=[0,1,2,3],
+        title=f"",
+        out_path=str(out_dir / "tput.png"),
+        ylabel="Average Throughput"
+    )
+    
+    plot_reward_bar(
+        reward_totals=outage_totals,
+        folder_names=[0,1,2,3],
+        title=f"",
+        out_path=str(out_dir / "outage.png"),
+        ylabel="Average Outage"
     )
 
     # ---- Console summary ----

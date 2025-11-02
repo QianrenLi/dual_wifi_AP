@@ -107,6 +107,36 @@ class CInt:
     def __repr__(self):
         return f"{self.__class__.__name__}({self.value})"
     
+    
+@register_jo()
+class CIntTypeII:
+    """Constrained integer with optional range."""
+    dim: int = 1
+    value_range: tuple = (None, None)  # (low, high)
+
+    def __init__(self, value: int):
+        if isinstance(value, list):
+            value = value[0]
+            
+        lo, hi = self.value_range
+        if lo is not None and hi is not None:
+            if value < 0:
+                value = hi + value * (hi - lo) / 2
+            else:
+                value = lo + value * (hi - lo) / 2
+                
+        self.value = int(value)
+
+    def to_jsonable(self):
+        return self.value
+
+    def __int__(self):
+        return self.value
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.value})"
+    
+    
 @register_jo()
 class C_LIST_FLOAT_DIM4_0_500(CListFloat):
     dim = 4
@@ -116,6 +146,9 @@ class C_LIST_FLOAT_DIM4_0_500(CListFloat):
 class C_INT_RANGE_0_13(CInt):
     value_range = (0, 13)
     
+@register_jo()
+class C_INT_RANGE_0_13_TypeII(CIntTypeII):
+    value_range = (0, 13)
 
 @register_jo()
 @dataclass
@@ -191,3 +224,8 @@ def list_to_cmd(cls, lst: List[float]):
         idx += dim
         out_kwargs[field.name] = field.type(seg)
     return cls(**out_kwargs)
+
+if __name__ == "__main__":
+    print(C_INT_RANGE_0_13_TypeII(-0.1))
+    print(C_INT_RANGE_0_13_TypeII(0.1))
+    print(C_INT_RANGE_0_13(0.5))

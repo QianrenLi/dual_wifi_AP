@@ -166,9 +166,9 @@ def push_rollout_to_trainer(folder: Path):
 
 
 def train_forever(conn: Connector, control_config: str, trace: Path, maybe_load: Path | None = None):
-    Connector("TrainAgent").killproc("train_rl.py", signal="-TERM")
-    print("clean up")
-    time.sleep(2)
+    # Connector("TrainAgent").killproc("train_rl.py", signal="-TERM")
+    # print("clean up")
+    # time.sleep(2)
     args = {"control_config": control_config, "trace_path": trace}
     if maybe_load is not None:
         args["load_path"] = str(maybe_load)
@@ -259,6 +259,7 @@ def run_iteration(
         # 6) pull new model & logs
         if iteration > 2:
             pull_trainer_artifacts(exp_name)
+            
         end_t = time.time()
 
         print(f"Iteration {iteration}:")

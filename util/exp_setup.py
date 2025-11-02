@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import os
 import json
+import time
 
 from pathlib import Path
 from typing import Dict, Tuple
@@ -26,9 +27,16 @@ def load_config_file(config_name):
 def create_transmission_config(config_name, exp_name, conn: Connector, is_update=False) -> Tuple[TxSrcs, Flows, TxSrcs, Flows]:
     cfg = load_config_file(config_name)
     clients = Connector().list_all()
-    for client in clients:
-        conn.batch(client, 'read_ip_addr')
-    outputs = conn.executor.wait(1).fetch().apply()
+    while True:
+        try:
+            for client in clients:
+                conn.batch(client, 'read_ip_addr')
+            outputs = conn.executor.wait(1).fetch().apply()
+            break
+        except Exception as e:
+            print("Script Assign Fail", e)
+            time.sleep(1)
+        
     results = [o["ip_addr"] for o in outputs]
     ip_table = {}
     for name, result in zip(clients, results):
