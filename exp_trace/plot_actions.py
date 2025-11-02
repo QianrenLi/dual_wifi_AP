@@ -28,7 +28,7 @@ def _trial_sort_key(p: Path) -> Tuple[int, str]:
     return (int(p.stat().st_mtime), p.name)
 
 def _list_trials(root: Path, recent: int) -> List[Path]:
-    trials = [p for p in root.iterdir() if p.is_dir() and p.name.startswith("trial_")]
+    trials = [p for p in root.iterdir() if p.is_dir() and p.name.startswith("IL_")]
     trials.sort(key=_trial_sort_key, reverse=True)
     if recent and recent > 0:
         trials = trials[:recent]
