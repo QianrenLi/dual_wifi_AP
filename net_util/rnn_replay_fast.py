@@ -132,14 +132,15 @@ class RNNPriReplayFast:
         self.reward_summary = (0,0,0)
         self.gamma_summary = (0,0,0)
         self.avg_return = 0
+        self.data_num = 0
         
     @staticmethod
     def build_from_traces(
         traces,
         device: str = "cuda",
         reward_agg: str = "sum",
-        recent_capacity: int = 10,
-        top_capacity: int = 300,
+        recent_capacity: int = 50,
+        top_capacity: int = 1000,
         init_loss: Optional[float] = None,
         **kwargs: dict,
     ):
@@ -173,12 +174,14 @@ class RNNPriReplayFast:
         self.reward_summary = merge(self.reward_summary, ep.reward_summary)
         self.gamma_summary = merge(self.gamma_summary, ep.gamma_summary) 
         self.avg_return += (ep.avg_return - self.avg_return) * ( ep.reward_summary[0] / self.reward_summary[0] )
+        self.data_num += ep.data_num
         
         self.recent_k.append(ep)
         if len(self.recent_k) > self.recent_capacity:
             heapq.heappush(self.heap, self.recent_k.pop(0))
             if len(self.heap) > self.top_capacity:
                 heapq.heappop(self.heap)
+                # self.data_num -= ep.data_num
 
         self.sigma = np.sqrt( var_unbiased(self.reward_summary) + var_unbiased(self.gamma_summary) * self.avg_return )
         
@@ -211,9 +214,9 @@ class RNNPriReplayFast:
         if need > 0 and len(self.heap) > 0:
             w = np.asarray([max(float(ep.loss), 1e-12) for ep in self.heap], dtype=np.float64)
             s = float(w.sum())
-            p = (w / s) if (s > 0.0 and np.isfinite(s)) else None
+            # p = (w / s) if (s > 0.0 and np.isfinite(s)) else None
             base = len(self.recent_k)
-            picked = np.random.choice(np.arange(base, base + len(self.heap)), size=need, replace=True, p=p)
+            picked = np.random.choice(np.arange(base, base + len(self.heap)), size=need, replace=True)
             heap_ids = picked.tolist()
 
         return recent_ids + heap_ids
@@ -296,6 +299,8 @@ class RNNPriReplayFast:
                 info["interference"] = [B,1] tensor on same device.
         """
         if (len(self.recent_k) + len(self.heap)) == 0:
+            return
+        elif self.data_num < 10e3:
             return
 
         # sample episodes & starts once
