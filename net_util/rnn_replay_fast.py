@@ -121,7 +121,7 @@ class Episode:
 # -------- Minimal Two-Tier RNN Replay --------
 @register_buffer
 class RNNPriReplayFast:
-    def __init__(self, device: str = "cuda", recent_capacity: int = 10, top_capacity: int = 10000, gamma = 0.99):
+    def __init__(self, device: str = "cuda", recent_capacity: int = 10, top_capacity: int = 10000, gamma = 0.99, writer = None):
         self.device = device
         self.recent_k: List[Episode] = []
         self.heap: List[Episode] = []
@@ -133,6 +133,9 @@ class RNNPriReplayFast:
         self.gamma_summary = (0,0,0)
         self.avg_return = 0
         self.data_num = 0
+        self.writer = writer
+        
+        self.run_return = 0
         
     @staticmethod
     def build_from_traces(
@@ -145,7 +148,9 @@ class RNNPriReplayFast:
         **kwargs: dict,
     ):
         assert len(traces) >= 1
-        buf = RNNPriReplayFast(device=device, recent_capacity=recent_capacity, top_capacity=top_capacity)
+        writer = kwargs.get("writer")
+        buf = RNNPriReplayFast(device=device, recent_capacity=recent_capacity, top_capacity=top_capacity, writer = writer)
+        
         for (states, actions, rewards, network_output), interference in zip(traces, kwargs.get('interference_vals')):
             buf.add_episode(states, actions, rewards, network_output, reward_agg, init_loss, interference)
         return buf
@@ -165,8 +170,9 @@ class RNNPriReplayFast:
         init_loss: Optional[float] = None,
         interference = 0,
     ):
+        obs_np, act_np, rew_np, next_obs_np, done_np  = _tracify(states, actions, rewards, network_output, reward_agg)
         ep = Episode(
-            *_tracify(states, actions, rewards, network_output, reward_agg),
+            obs_np, act_np, rew_np, next_obs_np, done_np,
             device=self.device,
             init_loss=100.0 if init_loss is None else float(init_loss),
             interference = interference
@@ -174,7 +180,11 @@ class RNNPriReplayFast:
         self.reward_summary = merge(self.reward_summary, ep.reward_summary)
         self.gamma_summary = merge(self.gamma_summary, ep.gamma_summary) 
         self.avg_return += (ep.avg_return - self.avg_return) * ( ep.reward_summary[0] / self.reward_summary[0] )
-        self.data_num += ep.data_num
+        
+        for r in rew_np:
+            self.run_return = r + self.gamma * self.run_return
+            self.data_num += 1
+            self.writer.add_scalar("data/return", self.run_return, self.data_num)
         
         self.recent_k.append(ep)
         if len(self.recent_k) > self.recent_capacity:

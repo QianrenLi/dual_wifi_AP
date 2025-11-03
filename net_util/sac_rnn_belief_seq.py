@@ -62,7 +62,8 @@ class SACRNNBeliefSeq(PolicyBase):
         self.buf = rollout_buffer
 
         # optimizers
-        self.actor_opt  = th.optim.Adam(self.net.actor_parameters(),  lr=cfg.lr * 0.1)
+        ac_lr = cfg.lr * 0.1 if cfg.batch_rl else cfg.lr
+        self.actor_opt  = th.optim.Adam(self.net.actor_parameters(),  lr=ac_lr)
         self.critic_opt = th.optim.Adam(self.net.critic_parameters(), lr=cfg.lr)
         self.belief_opt = th.optim.Adam(self.net.belief_parameteres(), lr=cfg.lr)
 
@@ -190,7 +191,6 @@ class SACRNNBeliefSeq(PolicyBase):
             got_any = True
             obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch  # time-major
             T, B, _ = obs_TBD.shape
-
             # Init hiddens for this batch
             h0, b0 = self.net.init_hidden(B, self.device)
             if self._belief is None or self._belief.shape[0] != B:
@@ -205,10 +205,24 @@ class SACRNNBeliefSeq(PolicyBase):
             interf_B1 = info["interference"]                     # [B,1]
             belief_mean_B1 = belief_seq_TB1.mean(dim=0)          # [B,1]
             resid2 = (interf_B1 - belief_mean_B1).pow(2)
-            const = th.log(th.tensor(2.0 * np.pi, device=self.device, dtype=th.float32))
-            b_loss = 0.5 * (resid2 + const).mean()
+            b_loss = resid2.mean()
+            
+            # KL divergence term for Information Bottleneck regularization
+            # Assuming belief_seq_TB1 is Gaussian, we compute the mean and standard deviation
+            belief_mu = belief_seq_TB1.mean(dim=0)  # [B, 1]
+            belief_sigma = belief_seq_TB1.std(dim=0)  # [B, 1]
+
+            # KL divergence between belief and standard normal (N(0, 1))
+            kl_loss = 0.5 * (belief_mu.pow(2) + belief_sigma.pow(2) - th.log(belief_sigma.pow(2)) - 1).mean()
+            # print(kl_loss)
+            lambda_ib = 1  # A hyperparameter to balance the loss terms
+            b_loss = b_loss + lambda_ib * kl_loss
             
             belief_seq_TB1_sac = belief_seq_TB1.detach()
+            
+            ## Make belief correct
+            # belief_seq_TB1_sac = th.cat([th.zeros(1, B, self.cfg.belief_dim, device=self.device), belief_seq_TB1_sac[:-1]], dim=0)
+            
 
             # ---- Encode whole sequence (online) ----
             with th.autocast(device_type='cuda', enabled=use_cuda_amp):
@@ -267,7 +281,7 @@ class SACRNNBeliefSeq(PolicyBase):
 
             self.belief_opt.zero_grad(set_to_none=True)
             scaler.scale(b_loss).backward()
-            b_gn = th.nn.utils.clip_grad_norm_(self.net.belief_parameteres(), 5.0)
+            # b_gn = th.nn.utils.clip_grad_norm_(self.net.belief_parameteres(), 5.0)
             scaler.step(self.belief_opt)
 
             scaler.update()
@@ -315,7 +329,7 @@ class SACRNNBeliefSeq(PolicyBase):
         self._belief_h = None
         self._belief = None
         
-        if self._upd % self.buf.data_num >= 4:
+        if not is_batch_rl and self._upd // self.buf.data_num >= 4:
             return False
 
         # epoch-end aggregates
@@ -332,7 +346,7 @@ class SACRNNBeliefSeq(PolicyBase):
 
         if local_writer:
             writer.flush(); writer.close()
-
+            
         return True
 
     @th.no_grad()
