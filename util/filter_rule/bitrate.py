@@ -7,7 +7,7 @@ def _is_num(x: Any) -> bool:
     return isinstance(x, (int, float))
 
 @register_filter
-def bitrate_delta(value: Any, alpha: float = 1.0, beta: float = 0.0):
+def bitrate_delta(value: Any, alpha: float = 1.0, beta: float = 0.0, offset = 0.0):
     """
     Compute alpha * bitrate + beta * Δbitrate with memory.
     Works for a single number or a dict of numbers, keeping per-key state.
@@ -23,7 +23,7 @@ def bitrate_delta(value: Any, alpha: float = 1.0, beta: float = 0.0):
         prev = prev_store.get("__scalar__")
         delta = 0.0 if prev is None else abs(float(value) - float(prev))
         prev_store["__scalar__"] = float(value)
-        return alpha * float(value) + beta * delta
+        return alpha * float(value) + beta * delta + offset
 
     # mapping (e.g., per-flow)
     if isinstance(value, dict):
@@ -36,7 +36,7 @@ def bitrate_delta(value: Any, alpha: float = 1.0, beta: float = 0.0):
             prev = prev_store.get(key)
             delta = 0.0 if prev is None else abs(float(v) - float(prev))
             prev_store[key] = float(v)
-            out[key] = alpha * float(v) + beta * delta
+            out[key] = alpha * float(v) + beta * delta + offset
         return out
 
     # unsupported shape
