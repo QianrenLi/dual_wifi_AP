@@ -223,7 +223,6 @@ class SACRNNBeliefSeq(PolicyBase):
             ## Make belief correct
             # belief_seq_TB1_sac = th.cat([th.zeros(1, B, self.cfg.belief_dim, device=self.device), belief_seq_TB1_sac[:-1]], dim=0)
             
-
             # ---- Encode whole sequence (online) ----
             with th.autocast(device_type='cuda', enabled=use_cuda_amp):
                 feat_TBH, hT = self.net.encode_seq(obs_TBD, belief_seq_TB1_sac, h0)  # use detached belief
@@ -366,6 +365,10 @@ class SACRNNBeliefSeq(PolicyBase):
             self._eval_h, self._belief_h = self.net.init_hidden(1, self.device)
             self._belief = th.zeros(1, self.cfg.belief_dim, device = self.device)
 
+        self._belief, self._belief_h = self.net.belief_predict_step(obs, self._belief_h)
+        self._belief = self._belief.detach()
+        self._belief_h = self._belief_h.detach()
+
         feat, h_next = self.net.encode(obs, self._belief, self._eval_h)
 
         if is_evaluate:
@@ -380,9 +383,6 @@ class SACRNNBeliefSeq(PolicyBase):
 
         self._eval_h = h_next.detach()
         
-        self._belief, self._belief_h = self.net.belief_predict_step(obs, self._belief_h)
-        self._belief = self._belief.detach()
-        self._belief_h = self._belief_h.detach()
 
         return {
             "action":   action[0].detach().cpu().numpy(),
