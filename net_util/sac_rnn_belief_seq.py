@@ -90,7 +90,7 @@ class SACRNNBeliefSeq(PolicyBase):
         
         self.last_obs = None
         
-        self.annealing_bl = lambda epoch, max_lb: max(epoch / 1000 * max_lb, max_lb)
+        self.annealing_bl = lambda epoch, max_lb: max(epoch / 3000 * max_lb, max_lb)
 
     def _alpha(self):
         return (self.log_alpha.exp() if self.log_alpha is not None else self.alpha_tensor).detach()
@@ -208,8 +208,10 @@ class SACRNNBeliefSeq(PolicyBase):
             # KL to N(0, I) with μ = feat, logvar = constant
             kl_loss = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
 
-            beta   = self.annealing_bl(epoch, 10)  # warm-up from 0 -> target
+            beta   = self.annealing_bl(epoch, 0.1)  # warm-up from 0 -> target
             b_loss = mse_loss + beta * kl_loss
+            
+            print(b_loss.item())
 
             # What SAC consumes (detach to protect the bottleneck)
             belief_seq_TB1_sac = z_TB1.detach()
@@ -359,8 +361,7 @@ class SACRNNBeliefSeq(PolicyBase):
             self._eval_h, self._belief_h = self.net.init_hidden(1, self.device)
 
         z_BH, h1, mu_BH, logvar_BH, y_hat_B1 = self.net.belief_predict_step(obs, self._belief_h)
-        self._belief_h = h1.detach()
-
+        
         if is_evaluate:
             feat, h_next = self.net.encode(obs, mu_BH.detach(), self._eval_h)
             mu, _ = self.net._mean_std(feat)
@@ -373,6 +374,7 @@ class SACRNNBeliefSeq(PolicyBase):
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
 
+        self._belief_h = h1.detach()
         self._eval_h = h_next.detach()
         
 
