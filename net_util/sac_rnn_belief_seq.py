@@ -89,6 +89,8 @@ class SACRNNBeliefSeq(PolicyBase):
         self.log_int = 50
         
         self.last_obs = None
+        
+        self.annealing_bl = lambda epoch, max_lb: max(epoch / 1000 * max_lb, max_lb)
 
     def _alpha(self):
         return (self.log_alpha.exp() if self.log_alpha is not None else self.alpha_tensor).detach()
@@ -196,28 +198,28 @@ class SACRNNBeliefSeq(PolicyBase):
                 self._belief_h = b0.clone()
 
             # ---- Belief sequence ----
-            belief_seq_TB1, _, belief_feat_TBH = self.net.belief_predict_seq(obs_TBD, self._belief_h)  # [T,B,1]
-            # simple supervision toward per-episode target in info["interference"] (B,1)
-            
-            interf_B1 = info["interference"]                     # [B,1]
-            belief_mean_B1 = belief_seq_TB1.mean(dim=0)          # [B,1]
-            resid2 = (interf_B1 - belief_mean_B1).pow(2)
-            b_loss = resid2.mean()
-            
-            # KL divergence term for Information Bottleneck regularization
-            belief_mu = belief_feat_TBH.mean(dim=0).pow(2)  # [B, 1]
-            belief_sigma = belief_feat_TBH.std(dim=0).pow(2).clamp_min(1e-6)  # [B, 1]
+            z_TB1, bT, mu_TB1, logvar_TB1, y_hat_TB1 = self.net.belief_predict_seq(obs_TBD, self._belief_h)
 
-            # KL divergence between belief and standard normal (N(0, 1))
-            kl_loss = 0.5 * (belief_mu + belief_sigma - th.log(belief_sigma) - 1).mean()
-            lambda_ib = 10  # A hyperparameter to balance the loss terms
-            b_loss = b_loss + lambda_ib * kl_loss
+            # Supervise from z (episode target)
+            interf_B1     = info["interference"]             # [B,1]
+            y_mean_B1     = y_hat_TB1.mean(dim=0)            # [B,1]  (or last valid step)
+            mse_loss      = (y_mean_B1 - interf_B1).pow(2).mean()
+
+            # KL to N(0, I) with μ = feat, logvar = constant
+            kl_loss = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
+
+            beta   = self.annealing_bl(epoch, 10)  # warm-up from 0 -> target
+            b_loss = mse_loss + beta * kl_loss
+
+            # What SAC consumes (detach to protect the bottleneck)
+            belief_seq_TB1_sac = z_TB1.detach()
+
+            # # (optional) cache
+            # self._belief_h = bT.detach()
+            # self._belief   = y_mean_B1.detach()
             
-            belief_seq_TB1_sac = belief_feat_TBH.detach()
-            
+
             ## Make belief correct
-            # belief_seq_TB1_sac = th.cat([th.zeros(1, B, self.cfg.belief_dim, device=self.device), belief_seq_TB1_sac[:-1]], dim=0)
-            
             # ---- Encode whole sequence (online) ----
             with th.autocast(device_type='cuda', enabled=use_cuda_amp):
                 feat_TBH, hT = self.net.encode_seq(obs_TBD, belief_seq_TB1_sac, h0)  # use detached belief
@@ -311,10 +313,6 @@ class SACRNNBeliefSeq(PolicyBase):
             ## update priorities using per-episode loss
             self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.detach().cpu().numpy())
 
-            # carry belief hidden for next batch
-            self._belief_h = self.net.belief_rnn.init_state(B, self.device)
-            self._belief   = th.zeros(B, self.cfg.belief_dim, device=self.device)
-
             self._global_step += 1
 
         if not got_any:
@@ -360,19 +358,18 @@ class SACRNNBeliefSeq(PolicyBase):
         if reset_hidden or self._eval_h is None:
             self._eval_h, self._belief_h = self.net.init_hidden(1, self.device)
 
-        _belief, self._belief_h, feat_BH = self.net.belief_predict_step(obs, self._belief_h)
-        self._belief_h = self._belief_h.detach()
-        feat_BH = feat_BH.detach()
-
-        feat, h_next = self.net.encode(obs, feat_BH, self._eval_h)
+        z_BH, h1, mu_BH, logvar_BH, y_hat_B1 = self.net.belief_predict_step(obs, self._belief_h)
+        self._belief_h = h1.detach()
 
         if is_evaluate:
+            feat, h_next = self.net.encode(obs, mu_BH.detach(), self._eval_h)
             mu, _ = self.net._mean_std(feat)
             action = th.tanh(mu)
             q1, q2 = self.net.q(feat, action)
             logp = th.zeros(1, 1, device=self.device)
             v_like = th.min(q1, q2)[0].detach().cpu().numpy()
         else:
+            feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
 
@@ -383,7 +380,7 @@ class SACRNNBeliefSeq(PolicyBase):
             "action":   action[0].detach().cpu().numpy(),
             "log_prob": logp[0].detach().cpu().numpy(),
             "value":    v_like,
-            "belief":   _belief[0].detach().cpu().numpy(),
+            "belief":   y_hat_B1[0].detach().cpu().numpy(),
         }
         
     def save(self, path: str):
