@@ -47,7 +47,7 @@ class Network(nn.Module):
 
         self.belief_rnn = FeatureExtractorGRU(obs_dim, belief_dim)
         self.belief_decoder = nn.Linear(belief_dim, 1)
-        self.register_buffer("ib_logvar_const", th.tensor(-2.0))  # σ ≈ exp(-1) ≈ 0.367
+        self.ib_logvar = nn.Parameter(th.full((belief_dim,), -2.0))
 
 
         # Actor
@@ -92,21 +92,24 @@ class Network(nn.Module):
     
     # -------- Belief --------
     def belief_predict_step(self, obs_BD: th.Tensor, h0: th.Tensor):
-        feat_BH, h1 = self.belief_rnn.forward_step(obs_BD, h0)   # [B, Hb]
-        mu_BH      = feat_BH                                     # μ = features
-        logvar_BH  = self.ib_logvar_const.expand_as(mu_BH)       # constant logvar
-        z_BH       = self._reparameterize(mu_BH, logvar_BH)      # [B, Hb]
-        y_hat_B1   = self.belief_decoder(z_BH)                   # [B, 1]
+        feat_BH, h1 = self.belief_rnn.forward_step(obs_BD, h0)    # [B, Hb]
+        mu_BH      = feat_BH                                      # μ = features
+        # expand [Hb] -> [B, Hb]; clamp is optional but helps stability
+        logvar_BH  = self.ib_logvar.clamp(-10.0, 10.0).expand_as(mu_BH)
+        # reparameterize (you can also use Normal(...).rsample())
+        z_BH       = self._reparameterize(mu_BH, logvar_BH)       # [B, Hb]
+        y_hat_B1   = self.belief_decoder(z_BH)                    # [B, 1]
         return z_BH, h1, mu_BH, logvar_BH, y_hat_B1
 
     def belief_predict_seq(self, obs_TBD: th.Tensor, h0: th.Tensor):
-        feat_TBH, hT = self.belief_rnn.forward_seq(obs_TBD, h0)  # [T, B, Hb]
-        mu_TBH      = feat_TBH                                   # μ = features
-        logvar_TBH  = self.ib_logvar_const.expand_as(mu_TBH)     # constant logvar
-        z_TBH       = self._reparameterize(mu_TBH, logvar_TBH)   # [T, B, Hb]
-        y_hat_TB1   = self.belief_decoder(z_TBH)                 # [T, B, 1]
+        feat_TBH, hT = self.belief_rnn.forward_seq(obs_TBD, h0)   # [T, B, Hb]
+        mu_TBH      = feat_TBH                                    # μ = features
+        # expand [Hb] -> [T, B, Hb]
+        logvar_TBH  = self.ib_logvar.clamp(-10.0, 10.0).view(1,1,-1).expand_as(mu_TBH)
+        z_TBH       = self._reparameterize(mu_TBH, logvar_TBH)    # [T, B, Hb]
+        y_hat_TB1   = self.belief_decoder(z_TBH)                  # [T, B, 1]
         return z_TBH, hT, mu_TBH, logvar_TBH, y_hat_TB1
-
+    
     # -------- Public API used by the trainer --------
     def init_hidden(self, bsz: int, device=None):
         return self.fe.init_state(bsz, device), self.belief_rnn.init_state(bsz, device)
@@ -193,4 +196,4 @@ class Network(nn.Module):
     def critic_parameters(self):
         return list(self.q1.parameters()) + list(self.q2.parameters()) + list(self.fe.parameters())
     def belief_parameteres(self):
-        return list(self.belief_rnn.parameters()) + list(self.belief_decoder.parameters())
+        return list(self.belief_rnn.parameters()) + list(self.belief_decoder.parameters()) + [self.ib_logvar]
