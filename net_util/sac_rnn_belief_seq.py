@@ -58,7 +58,7 @@ class SACRNNBeliefSeq(PolicyBase):
         # Load network module
         net_mod = importlib.import_module(cfg.network_module_path)
         Network = getattr(net_mod, "Network")
-        self.net:net = Network(cfg.obs_dim, cfg.act_dim, scale_log_offset=0, belief_dim = cfg.belief_dim).to(self.device) # type: ignore
+        self.net = Network(cfg.obs_dim, cfg.act_dim, scale_log_offset=0, belief_dim = cfg.belief_dim).to(self.device) # type: ignore
         self.buf = rollout_buffer
 
         # optimizers
@@ -84,7 +84,6 @@ class SACRNNBeliefSeq(PolicyBase):
         self._epoch_h = None
         self._eval_h = None
         self._belief_h = None
-        self._belief = None
         self._global_step = 0
         
         self.log_int = 50
@@ -193,13 +192,11 @@ class SACRNNBeliefSeq(PolicyBase):
             T, B, _ = obs_TBD.shape
             # Init hiddens for this batch
             h0, b0 = self.net.init_hidden(B, self.device)
-            if self._belief is None or self._belief.shape[0] != B:
-                self._belief = th.zeros(B, self.cfg.belief_dim, device=self.device)
             if self._belief_h is None or self._belief_h.shape[1] != B:
                 self._belief_h = b0.clone()
 
             # ---- Belief sequence ----
-            belief_seq_TB1, bT = self.net.belief_predict_seq(obs_TBD, self._belief_h)  # [T,B,1]
+            belief_seq_TB1, _, belief_feat_TBH = self.net.belief_predict_seq(obs_TBD, self._belief_h)  # [T,B,1]
             # simple supervision toward per-episode target in info["interference"] (B,1)
             
             interf_B1 = info["interference"]                     # [B,1]
@@ -208,17 +205,15 @@ class SACRNNBeliefSeq(PolicyBase):
             b_loss = resid2.mean()
             
             # KL divergence term for Information Bottleneck regularization
-            # Assuming belief_seq_TB1 is Gaussian, we compute the mean and standard deviation
-            belief_mu = belief_seq_TB1.mean(dim=0)  # [B, 1]
-            belief_sigma = belief_seq_TB1.std(dim=0)  # [B, 1]
+            belief_mu = belief_feat_TBH.mean(dim=0).pow(2)  # [B, 1]
+            belief_sigma = belief_feat_TBH.std(dim=0).pow(2).clamp_min(1e-6)  # [B, 1]
 
             # KL divergence between belief and standard normal (N(0, 1))
-            kl_loss = 0.5 * (belief_mu.pow(2) + belief_sigma.pow(2) - th.log(belief_sigma.pow(2)) - 1).mean()
-            # print(kl_loss)
-            lambda_ib = 1  # A hyperparameter to balance the loss terms
+            kl_loss = 0.5 * (belief_mu + belief_sigma - th.log(belief_sigma) - 1).mean()
+            lambda_ib = 10  # A hyperparameter to balance the loss terms
             b_loss = b_loss + lambda_ib * kl_loss
             
-            belief_seq_TB1_sac = belief_seq_TB1.detach()
+            belief_seq_TB1_sac = belief_feat_TBH.detach()
             
             ## Make belief correct
             # belief_seq_TB1_sac = th.cat([th.zeros(1, B, self.cfg.belief_dim, device=self.device), belief_seq_TB1_sac[:-1]], dim=0)
@@ -242,7 +237,8 @@ class SACRNNBeliefSeq(PolicyBase):
                 diff = diff / self.buf.sigma
                 c_loss_per_t = diff.pow(2).mean(dim=0)          # [T,B,1]
                 c_loss_batch = c_loss_per_t.mean(dim=(0,2))     # [B]
-                c_loss = c_loss_batch.mean()
+                importance_weights = info['is_weights'].detach().squeeze(-1)
+                c_loss = (c_loss_batch * importance_weights ).mean() / (importance_weights.mean() + 1e-8 )
                 
                 if is_batch_rl:
                     critic_td_only = c_loss.detach()
@@ -313,7 +309,7 @@ class SACRNNBeliefSeq(PolicyBase):
             if self.alpha_opt is not None: ent_losses.append(ent_loss.item())
 
             ## update priorities using per-episode loss
-            # self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.detach().cpu().numpy())
+            self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.detach().cpu().numpy())
 
             # carry belief hidden for next batch
             self._belief_h = self.net.belief_rnn.init_state(B, self.device)
@@ -363,13 +359,12 @@ class SACRNNBeliefSeq(PolicyBase):
 
         if reset_hidden or self._eval_h is None:
             self._eval_h, self._belief_h = self.net.init_hidden(1, self.device)
-            self._belief = th.zeros(1, self.cfg.belief_dim, device = self.device)
 
-        self._belief, self._belief_h = self.net.belief_predict_step(obs, self._belief_h)
-        self._belief = self._belief.detach()
+        _belief, self._belief_h, feat_BH = self.net.belief_predict_step(obs, self._belief_h)
         self._belief_h = self._belief_h.detach()
+        feat_BH = feat_BH.detach()
 
-        feat, h_next = self.net.encode(obs, self._belief, self._eval_h)
+        feat, h_next = self.net.encode(obs, feat_BH, self._eval_h)
 
         if is_evaluate:
             mu, _ = self.net._mean_std(feat)
@@ -388,7 +383,7 @@ class SACRNNBeliefSeq(PolicyBase):
             "action":   action[0].detach().cpu().numpy(),
             "log_prob": logp[0].detach().cpu().numpy(),
             "value":    v_like,
-            "belief":   self._belief[0].detach().cpu().numpy(),
+            "belief":   _belief[0].detach().cpu().numpy(),
         }
         
     def save(self, path: str):
@@ -414,7 +409,7 @@ class SACRNNBeliefSeq(PolicyBase):
         self.critic_opt.load_state_dict(checkpoint['critic_opt_state_dict'])
         self.belief_opt.load_state_dict(checkpoint['belief_opt_state_dict'])
         
-        if 'log_alpha' in checkpoint and checkpoint['log_alpha']:
+        if checkpoint.get('log_alpha') is not None:
             self.log_alpha = checkpoint['log_alpha'].to(device)  # Directly assign the tensor
 
         if 'alpha_opt_state_dict' in checkpoint and checkpoint['alpha_opt_state_dict']:

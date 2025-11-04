@@ -45,8 +45,8 @@ class Network(nn.Module):
         self.fe   = FeatureExtractorGRU(obs_dim + belief_dim, hidden)
         self.fe_t = FeatureExtractorGRU(obs_dim + belief_dim, hidden)
 
-        self.belief_rnn  = FeatureExtractorGRU(obs_dim, hidden)
-        self.belief_head = nn.Linear(hidden, 1)
+        self.belief_rnn  = FeatureExtractorGRU(obs_dim, belief_dim)
+        self.belief_head = nn.Linear(belief_dim, 1)
 
         # Actor
         self.mu          = nn.Linear(hidden, act_dim)
@@ -86,11 +86,11 @@ class Network(nn.Module):
     # -------- Belief --------
     def belief_predict_step(self, obs_BD: th.Tensor, h0: th.Tensor):
         feat_BH, h1 = self.belief_rnn.forward_step(obs_BD, h0)
-        return self.belief_head(feat_BH), h1
+        return self.belief_head(feat_BH), h1, feat_BH
 
     def belief_predict_seq(self, obs_TBD: th.Tensor, h0: th.Tensor):
         feat_TBH, hT = self.belief_rnn.forward_seq(obs_TBD, h0)
-        return self.belief_head(feat_TBH), hT                       # [T,B,1], [1,B,H]
+        return self.belief_head(feat_TBH), hT, feat_TBH                  # [T,B,1], [1,B,H]
 
     # -------- Public API used by the trainer --------
     def init_hidden(self, bsz: int, device=None):
