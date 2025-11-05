@@ -206,20 +206,17 @@ class SACRNNBeliefSeq(PolicyBase):
             mse_loss      = (y_mean_B1 - interf_B1).pow(2).mean()
 
             # KL to N(0, I) with μ = feat, logvar = constant
-            kl_loss = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
+            # kl_loss = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
 
-            beta   = self.annealing_bl(epoch, 0.1)  # warm-up from 0 -> target
-            b_loss = mse_loss + beta * kl_loss
+            # beta   = self.annealing_bl(epoch, 0.1)  # warm-up from 0 -> target
+            # b_loss = mse_loss + beta * kl_loss
             
-            print(b_loss.item())
-
+            b_loss = mse_loss
+            
             # What SAC consumes (detach to protect the bottleneck)
-            belief_seq_TB1_sac = z_TB1.detach()
+            # belief_seq_TB1_sac = z_TB1.detach()
 
-            # # (optional) cache
-            # self._belief_h = bT.detach()
-            # self._belief   = y_mean_B1.detach()
-            
+            belief_seq_TB1_sac = th.zeros_like(z_TB1, device = z_TB1.device)
 
             ## Make belief correct
             # ---- Encode whole sequence (online) ----
@@ -370,7 +367,8 @@ class SACRNNBeliefSeq(PolicyBase):
             logp = th.zeros(1, 1, device=self.device)
             v_like = th.min(q1, q2)[0].detach().cpu().numpy()
         else:
-            feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
+            # feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
+            feat, h_next = self.net.encode(obs, th.zeros_like(z_BH, device = z_BH.device), self._eval_h)
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
 
