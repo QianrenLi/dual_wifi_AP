@@ -18,11 +18,12 @@ def scale_outage(value: Any, zeta: float = 1.0, minimum = None):
             return max(val, minimum)
         
     if _is_num(value):
-        return clip_minimum(zeta * float(value))
+        return clip_minimum(zeta * float(value), minimum=minimum)
+    
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
             if _is_num(v):
-                out[str(k)] = clip_minimum(zeta * float(v))
+                out[str(k)] = clip_minimum(zeta * float(v), minimum=minimum)
         return out
     return None
