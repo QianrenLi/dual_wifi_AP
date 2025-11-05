@@ -95,7 +95,7 @@ class Network(nn.Module):
         feat_BH, h1 = self.belief_rnn.forward_step(obs_BD, h0)    # [B, Hb]
         mu_BH      = feat_BH                                      # μ = features
         # expand [Hb] -> [B, Hb]; clamp is optional but helps stability
-        logvar_BH  = self.ib_logvar.clamp(-10.0, 10.0).expand_as(mu_BH)
+        logvar_BH  = self.ib_logvar.clamp(-10.0, 2.0).expand_as(mu_BH)
         # reparameterize (you can also use Normal(...).rsample())
         z_BH       = self._reparameterize(mu_BH, logvar_BH)       # [B, Hb]
         y_hat_B1   = self.belief_decoder(z_BH)                    # [B, 1]
@@ -105,7 +105,7 @@ class Network(nn.Module):
         feat_TBH, hT = self.belief_rnn.forward_seq(obs_TBD, h0)   # [T, B, Hb]
         mu_TBH      = feat_TBH                                    # μ = features
         # expand [Hb] -> [T, B, Hb]
-        logvar_TBH  = self.ib_logvar.clamp(-10.0, 10.0).view(1,1,-1).expand_as(mu_TBH)
+        logvar_TBH  = self.ib_logvar.clamp(-10.0, 2.0).view(1,1,-1).expand_as(mu_TBH)
         z_TBH       = self._reparameterize(mu_TBH, logvar_TBH)    # [T, B, Hb]
         y_hat_TB1   = self.belief_decoder(z_TBH)                  # [T, B, 1]
         return z_TBH, hT, mu_TBH, logvar_TBH, y_hat_TB1

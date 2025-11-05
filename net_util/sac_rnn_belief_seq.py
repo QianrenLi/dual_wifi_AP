@@ -45,6 +45,11 @@ class SACRNNBeliefSeq_Config:
     load_path = "latest.pt"
     
     batch_rl = False
+    
+    # --- retraining timer (0 disables) ---
+    retrain_interval: int = 0                 # e.g., 500; 0 => off
+    retrain_reset_alpha: bool = True          # reset temperature (α) when retraining
+    retrain_reset_targets: bool = True        # reinit target nets from freshly reset critics
 
 @register_policy
 class SACRNNBeliefSeq(PolicyBase):
@@ -95,6 +100,79 @@ class SACRNNBeliefSeq(PolicyBase):
     def _alpha(self):
         return (self.log_alpha.exp() if self.log_alpha is not None else self.alpha_tensor).detach()
 
+    def _reset_modules_excluding_belief_(self):
+        """
+        Reinitialize all submodules that are *not* part of the belief network.
+        Uses each module's reset_parameters() if present; leaves belief as-is.
+        """
+        # Build a set of Param object ids that belong to belief
+        belief_param_ids = {id(p) for p in self.net.belief_parameteres()}
+
+        for m in self.net.modules():
+            # only operate at this module's *own* params (avoid double-initting via recurse)
+            own_params = list(m.parameters(recurse=False))
+            if not own_params:
+                continue
+            # If any param in this module belongs to belief, skip the whole module
+            if any(id(p) in belief_param_ids for p in own_params):
+                continue
+            # Otherwise, if the module knows how to reset itself, do it
+            if hasattr(m, "reset_parameters") and callable(getattr(m, "reset_parameters")):
+                m.reset_parameters()
+
+    @th.no_grad()
+    def _hard_copy_(self, tgt: nn.Module, src: nn.Module):
+        for tp, sp in zip(tgt.parameters(), src.parameters()):
+            tp.data.copy_(sp.data)
+
+    def _reinit_actor_critic_(self, writer: Optional[SummaryWriter], epoch: int):
+        """
+        Reinitialize actor & critic stacks (fe/q1/q2 + actor), keep belief unchanged.
+        Optionally reset α and re-init target nets.
+        """
+        # 1) Reinitialize all non-belief submodules
+        self._reset_modules_excluding_belief_()
+
+        # 2) Reinitialize target networks from the (now fresh) critics/encoder
+        if self.cfg.retrain_reset_targets:
+            with th.no_grad():
+                self._hard_copy_(self.net.q1_t, self.net.q1)
+                self._hard_copy_(self.net.q2_t, self.net.q2)
+                # If you keep a target FE, refresh it too
+                if hasattr(self.net, "fe_t") and hasattr(self.net, "fe"):
+                    self._hard_copy_(self.net.fe_t, self.net.fe)
+
+        # 3) Reset actor & critic optimizers (fresh states)
+        ac_lr = self.cfg.lr * 0.1 if self.cfg.batch_rl else self.cfg.lr
+        self.actor_opt  = th.optim.Adam(self.net.actor_parameters(),  lr=ac_lr)
+        self.critic_opt = th.optim.Adam(self.net.critic_parameters(), lr=self.cfg.lr)
+
+        # 4) Keep belief optimizer/state as-is (explicitly requested)
+        #    (If you ever want to reset its state, do it here.)
+
+        # 5) Reset α if configured
+        if self.cfg.retrain_reset_alpha:
+            if self.cfg.ent_coef == "auto" and self.cfg.batch_rl == False:
+                self.log_alpha = th.tensor([self.cfg.ent_coef_init], device=self.device).log().requires_grad_(True)
+                self.alpha_opt = th.optim.Adam([self.log_alpha], lr=self.cfg.lr)
+                self.target_entropy = -float(self.cfg.act_dim) if self.cfg.target_entropy == "auto" else float(self.cfg.target_entropy)
+            else:
+                self.log_alpha, self.alpha_opt = None, None
+                self.alpha_tensor = th.tensor(float(0.2), device=self.device)
+
+        # 6) Clear some carried states (safe choice for a fresh start of actor/critic)
+        self._epoch_h = None
+        self._eval_h = None
+        # Keep belief hidden unless you also want to hard reset it:
+        # self._belief_h = None
+
+        if writer is not None:
+            writer.add_text("retrain/event", f"Actor/Critic reinitialized at epoch {epoch}", epoch)
+
+    def _maybe_retrain_(self, epoch: int, writer: Optional[SummaryWriter]):
+        itv = getattr(self.cfg, "retrain_interval", 0) or 0
+        if itv > 0 and epoch > 0 and (epoch % itv) == 0:
+            self._reinit_actor_critic_(writer, epoch)
 
     def cdl_loss(
         self,
@@ -182,6 +260,8 @@ class SACRNNBeliefSeq(PolicyBase):
         local_writer = False
         if writer is None:
             writer = SummaryWriter(log_dir=log_dir); local_writer = True
+            
+        self._maybe_retrain_(epoch, writer)
 
         actor_losses, critic_losses, ent_losses = [], [], []
         q1_means, q2_means, qmin_pi_means, logp_means = [], [], [], []
@@ -206,17 +286,12 @@ class SACRNNBeliefSeq(PolicyBase):
             mse_loss      = (y_mean_B1 - interf_B1).pow(2).mean()
 
             # KL to N(0, I) with μ = feat, logvar = constant
-            # kl_loss = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
+            kl_loss = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
 
-            # beta   = self.annealing_bl(epoch, 0.1)  # warm-up from 0 -> target
-            # b_loss = mse_loss + beta * kl_loss
+            beta   = self.annealing_bl(epoch, 0.1)  # warm-up from 0 -> target
+            b_loss = mse_loss + beta * kl_loss
             
-            b_loss = mse_loss
-            
-            # What SAC consumes (detach to protect the bottleneck)
-            # belief_seq_TB1_sac = z_TB1.detach()
-
-            belief_seq_TB1_sac = th.zeros_like(z_TB1, device = z_TB1.device)
+            belief_seq_TB1_sac = z_TB1.detach()
 
             ## Make belief correct
             # ---- Encode whole sequence (online) ----
@@ -367,8 +442,7 @@ class SACRNNBeliefSeq(PolicyBase):
             logp = th.zeros(1, 1, device=self.device)
             v_like = th.min(q1, q2)[0].detach().cpu().numpy()
         else:
-            # feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
-            feat, h_next = self.net.encode(obs, th.zeros_like(z_BH, device = z_BH.device), self._eval_h)
+            feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
 
