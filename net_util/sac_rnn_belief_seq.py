@@ -272,6 +272,7 @@ class SACRNNBeliefSeq(PolicyBase):
             got_any = True
             obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch  # time-major
             T, B, _ = obs_TBD.shape
+            importance_weights = info['is_weights'].detach().squeeze(-1)
             # Init hiddens for this batch
             h0, b0 = self.net.init_hidden(B, self.device)
             if self._belief_h is None or self._belief_h.shape[1] != B:
@@ -282,16 +283,15 @@ class SACRNNBeliefSeq(PolicyBase):
 
             # Supervise from z (episode target)
             interf_B1     = info["interference"]             # [B,1]
-            y_mean_B1     = y_hat_TB1.mean(dim=0)            # [B,1]  (or last valid step)
-            mse_loss      = (y_mean_B1 - interf_B1).pow(2).mean()
-
+            mse_loss      = ((y_hat_TB1 - interf_B1).pow(2).mean(dim=(0, 2)) * importance_weights).mean()
+            
             # KL to N(0, I) with μ = feat, logvar = constant
             kl_loss = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
 
             beta   = self.annealing_bl(epoch, 0.1)  # warm-up from 0 -> target
             b_loss = mse_loss + beta * kl_loss
             
-            belief_seq_TB1_sac = z_TB1.detach()
+            belief_seq_TB1_sac = mu_TB1.detach()
 
             ## Make belief correct
             # ---- Encode whole sequence (online) ----
@@ -313,7 +313,7 @@ class SACRNNBeliefSeq(PolicyBase):
                 diff = diff / self.buf.sigma
                 c_loss_per_t = diff.pow(2).mean(dim=0)          # [T,B,1]
                 c_loss_batch = c_loss_per_t.mean(dim=(0,2))     # [B]
-                importance_weights = info['is_weights'].detach().squeeze(-1)
+                
                 c_loss = (c_loss_batch * importance_weights ).mean() / (importance_weights.mean() + 1e-8 )
                 
                 if is_batch_rl:
@@ -442,7 +442,7 @@ class SACRNNBeliefSeq(PolicyBase):
             logp = th.zeros(1, 1, device=self.device)
             v_like = th.min(q1, q2)[0].detach().cpu().numpy()
         else:
-            feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
+            feat, h_next = self.net.encode(obs, mu_BH.detach(), self._eval_h)
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
 

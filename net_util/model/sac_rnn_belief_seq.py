@@ -45,10 +45,10 @@ class Network(nn.Module):
         self.fe   = FeatureExtractorGRU(obs_dim + belief_dim, hidden)
         self.fe_t = FeatureExtractorGRU(obs_dim + belief_dim, hidden)
 
-        self.belief_rnn = FeatureExtractorGRU(obs_dim, belief_dim)
+        self.belief_rnn = FeatureExtractorGRU(obs_dim, hidden)
+        self.belief_encoder = nn.Sequential(nn.Linear(hidden, belief_dim), nn.LayerNorm(belief_dim), nn.GELU())
         self.belief_decoder = nn.Linear(belief_dim, 1)
         self.ib_logvar = nn.Parameter(th.full((belief_dim,), -2.0))
-
 
         # Actor
         self.mu          = nn.Linear(hidden, act_dim)
@@ -93,7 +93,7 @@ class Network(nn.Module):
     # -------- Belief --------
     def belief_predict_step(self, obs_BD: th.Tensor, h0: th.Tensor):
         feat_BH, h1 = self.belief_rnn.forward_step(obs_BD, h0)    # [B, Hb]
-        mu_BH      = feat_BH                                      # μ = features
+        mu_BH      = self.belief_encoder(feat_BH)                 # μ = features
         # expand [Hb] -> [B, Hb]; clamp is optional but helps stability
         logvar_BH  = self.ib_logvar.clamp(-10.0, 2.0).expand_as(mu_BH)
         # reparameterize (you can also use Normal(...).rsample())
@@ -103,7 +103,7 @@ class Network(nn.Module):
 
     def belief_predict_seq(self, obs_TBD: th.Tensor, h0: th.Tensor):
         feat_TBH, hT = self.belief_rnn.forward_seq(obs_TBD, h0)   # [T, B, Hb]
-        mu_TBH      = feat_TBH                                    # μ = features
+        mu_TBH       = self.belief_encoder(feat_TBH)              # μ = features
         # expand [Hb] -> [T, B, Hb]
         logvar_TBH  = self.ib_logvar.clamp(-10.0, 2.0).view(1,1,-1).expand_as(mu_TBH)
         z_TBH       = self._reparameterize(mu_TBH, logvar_TBH)    # [T, B, Hb]
@@ -196,4 +196,4 @@ class Network(nn.Module):
     def critic_parameters(self):
         return list(self.q1.parameters()) + list(self.q2.parameters()) + list(self.fe.parameters())
     def belief_parameteres(self):
-        return list(self.belief_rnn.parameters()) + list(self.belief_decoder.parameters()) + [self.ib_logvar]
+        return list(self.belief_rnn.parameters()) + list(self.belief_encoder.parameters()) + list(self.belief_decoder.parameters()) + [self.ib_logvar]
