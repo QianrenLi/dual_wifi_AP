@@ -46,9 +46,12 @@ class Network(nn.Module):
         self.fe_t = FeatureExtractorGRU(obs_dim + belief_dim, hidden)
 
         self.belief_rnn = FeatureExtractorGRU(obs_dim, hidden)
-        self.belief_encoder = nn.Sequential(nn.Linear(hidden, belief_dim), nn.LayerNorm(belief_dim), nn.GELU())
+        self.belief_encoder = nn.Linear(hidden, belief_dim)
+        self.belief_logvar_head = nn.Linear(hidden, belief_dim)
+        # nn.init.zeros_(self.belief_logvar_head.weight)
+        # nn.init.constant_(self.belief_logvar_head.bias, -2.0)
+        
         self.belief_decoder = nn.Linear(belief_dim, 1)
-        self.ib_logvar = nn.Parameter(th.full((belief_dim,), -2.0))
 
         # Actor
         self.mu          = nn.Linear(hidden, act_dim)
@@ -94,8 +97,8 @@ class Network(nn.Module):
     def belief_predict_step(self, obs_BD: th.Tensor, h0: th.Tensor):
         feat_BH, h1 = self.belief_rnn.forward_step(obs_BD, h0)    # [B, Hb]
         mu_BH      = self.belief_encoder(feat_BH)                 # μ = features
-        # expand [Hb] -> [B, Hb]; clamp is optional but helps stability
-        logvar_BH  = self.ib_logvar.clamp(-10.0, 2.0).expand_as(mu_BH)
+        logvar_BH   = self.belief_logvar_head(feat_BH)            # [B, Hb]
+        logvar_BH   = logvar_BH.clamp(-10.0, 2.0)                 # stability
         # reparameterize (you can also use Normal(...).rsample())
         z_BH       = self._reparameterize(mu_BH, logvar_BH)       # [B, Hb]
         y_hat_B1   = self.belief_decoder(z_BH)                    # [B, 1]
@@ -104,8 +107,8 @@ class Network(nn.Module):
     def belief_predict_seq(self, obs_TBD: th.Tensor, h0: th.Tensor):
         feat_TBH, hT = self.belief_rnn.forward_seq(obs_TBD, h0)   # [T, B, Hb]
         mu_TBH       = self.belief_encoder(feat_TBH)              # μ = features
-        # expand [Hb] -> [T, B, Hb]
-        logvar_TBH  = self.ib_logvar.clamp(-10.0, 2.0).view(1,1,-1).expand_as(mu_TBH)
+        logvar_TBH   = self.belief_logvar_head(feat_TBH)          # [T,B,Hb]
+        logvar_TBH   = logvar_TBH.clamp(-10.0, 2.0)
         z_TBH       = self._reparameterize(mu_TBH, logvar_TBH)    # [T, B, Hb]
         y_hat_TB1   = self.belief_decoder(z_TBH)                  # [T, B, 1]
         return z_TBH, hT, mu_TBH, logvar_TBH, y_hat_TB1
@@ -196,4 +199,4 @@ class Network(nn.Module):
     def critic_parameters(self):
         return list(self.q1.parameters()) + list(self.q2.parameters()) + list(self.fe.parameters())
     def belief_parameteres(self):
-        return list(self.belief_rnn.parameters()) + list(self.belief_encoder.parameters()) + list(self.belief_decoder.parameters()) + [self.ib_logvar]
+        return list(self.belief_rnn.parameters()) + list(self.belief_encoder.parameters()) + list(self.belief_decoder.parameters()) + list(self.belief_logvar_head.parameters())

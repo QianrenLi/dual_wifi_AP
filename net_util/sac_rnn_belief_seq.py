@@ -288,10 +288,10 @@ class SACRNNBeliefSeq(PolicyBase):
             # KL to N(0, I) with μ = feat, logvar = constant
             kl_loss = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
 
-            beta   = self.annealing_bl(epoch, 0.1)  # warm-up from 0 -> target
+            beta   = self.annealing_bl(epoch, 100)  # warm-up from 0 -> target
             b_loss = mse_loss + beta * kl_loss
             
-            belief_seq_TB1_sac = mu_TB1.detach()
+            belief_seq_TB1_sac = z_TB1.detach()
 
             ## Make belief correct
             # ---- Encode whole sequence (online) ----
@@ -435,14 +435,14 @@ class SACRNNBeliefSeq(PolicyBase):
         z_BH, h1, mu_BH, logvar_BH, y_hat_B1 = self.net.belief_predict_step(obs, self._belief_h)
         
         if is_evaluate:
-            feat, h_next = self.net.encode(obs, mu_BH.detach(), self._eval_h)
+            feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
             mu, _ = self.net._mean_std(feat)
             action = th.tanh(mu)
             q1, q2 = self.net.q(feat, action)
             logp = th.zeros(1, 1, device=self.device)
             v_like = th.min(q1, q2)[0].detach().cpu().numpy()
         else:
-            feat, h_next = self.net.encode(obs, mu_BH.detach(), self._eval_h)
+            feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
 
