@@ -445,14 +445,14 @@ class SACRNNBeliefSeq(PolicyBase):
         z_BH, h1, mu_BH, logvar_BH, y_hat_B1 = self.net.belief_predict_step(obs, self._belief_h)
         
         if is_evaluate:
-            feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
+            feat, h_next = self.net.encode(obs, mu_BH.detach(), self._eval_h)
             mu, _ = self.net._mean_std(feat)
             action = th.tanh(mu)
             q1, q2 = self.net.q(feat, action)
             logp = th.zeros(1, 1, device=self.device)
             v_like = th.min(q1, q2)[0].detach().cpu().numpy()
         else:
-            feat, h_next = self.net.encode(obs, mu_BH.detach(), self._eval_h)
+            feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
 
