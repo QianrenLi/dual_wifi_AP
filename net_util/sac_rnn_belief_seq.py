@@ -95,7 +95,10 @@ class SACRNNBeliefSeq(PolicyBase):
         
         self.last_obs = None
         
-        self.annealing_bl = lambda epoch, max_lb: max(epoch / 3000 * max_lb, max_lb)
+        self.annealing_bl = lambda epoch, max_lb: min(epoch / 10e3 * max_lb, max_lb)
+        
+        self.retrain_idx = 0
+        self.max_retrain = 5
 
     def _alpha(self):
         return (self.log_alpha.exp() if self.log_alpha is not None else self.alpha_tensor).detach()
@@ -171,8 +174,9 @@ class SACRNNBeliefSeq(PolicyBase):
 
     def _maybe_retrain_(self, epoch: int, writer: Optional[SummaryWriter]):
         itv = getattr(self.cfg, "retrain_interval", 0) or 0
-        if itv > 0 and epoch > 0 and (epoch % itv) == 0:
+        if itv > 0 and epoch > 0 and (epoch % itv) == 0 and self.retrain_idx < self.max_retrain:
             self._reinit_actor_critic_(writer, epoch)
+            self.retrain_idx += 1
 
     def cdl_loss(
         self,
@@ -277,21 +281,27 @@ class SACRNNBeliefSeq(PolicyBase):
             h0, b0 = self.net.init_hidden(B, self.device)
             if self._belief_h is None or self._belief_h.shape[1] != B:
                 self._belief_h = b0.clone()
+                
 
-            # ---- Belief sequence ----
-            z_TB1, bT, mu_TB1, logvar_TB1, y_hat_TB1 = self.net.belief_predict_seq(obs_TBD, self._belief_h)
+            # ---- Belief sequence (TRAIN) ----
+            B = obs_TBD.size(1)
+            belief_h0 = self.net.belief_rnn.init_state(B, device=self.device)  # <-- always fresh zeros
+            z_TB1, bT, mu_TB1, logvar_TB1, y_hat_TB1 = self.net.belief_predict_seq(obs_TBD, belief_h0)
 
-            # Supervise from z (episode target)
-            interf_B1     = info["interference"]             # [B,1]
-            mse_loss      = ((y_hat_TB1 - interf_B1).pow(2).mean(dim=(0, 2)) * importance_weights).mean()
-            
-            # KL to N(0, I) with μ = feat, logvar = constant
-            kl_loss = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
+            # Supervise only the last step of the window
+            interf_B1 = info["interference"]               # [B,1], episode-level label
+            iw_B1     = info["is_weights"].detach()        # [B,1]
 
-            beta   = self.annealing_bl(epoch, 100)  # warm-up from 0 -> target
-            b_loss = mse_loss + beta * kl_loss
-            
-            belief_seq_TB1_sac = z_TB1.detach()
+            y_last_B1   = y_hat_TB1[-1]                    # [B,1]
+            mu_last_BH  = mu_TB1[-1]                       # [B,H]
+            logv_last_BH= logvar_TB1[-1]                   # [B,H]
+
+            mse_loss = ((y_last_B1 - interf_B1).pow(2) * iw_B1).mean()
+            kl_loss  = (0.5 * (mu_last_BH.pow(2) + logv_last_BH.exp() - logv_last_BH - 1.0)).mean()
+            beta     = self.annealing_bl(epoch, 100)
+            b_loss   = mse_loss + beta * kl_loss
+            b_loss = mse_loss
+            belief_seq_TB1_sac = z_TB1.detach()            # safe for RL path
 
             ## Make belief correct
             # ---- Encode whole sequence (online) ----
@@ -352,7 +362,7 @@ class SACRNNBeliefSeq(PolicyBase):
 
             self.belief_opt.zero_grad(set_to_none=True)
             scaler.scale(b_loss).backward()
-            # b_gn = th.nn.utils.clip_grad_norm_(self.net.belief_parameteres(), 5.0)
+            b_gn = th.nn.utils.clip_grad_norm_(self.net.belief_parameteres(), 5.0)
             scaler.step(self.belief_opt)
 
             scaler.update()
@@ -442,7 +452,7 @@ class SACRNNBeliefSeq(PolicyBase):
             logp = th.zeros(1, 1, device=self.device)
             v_like = th.min(q1, q2)[0].detach().cpu().numpy()
         else:
-            feat, h_next = self.net.encode(obs, z_BH.detach(), self._eval_h)
+            feat, h_next = self.net.encode(obs, mu_BH.detach(), self._eval_h)
             action, logp = self.net.sample_from_features(feat, detach_feat_for_actor=True)
             v_like = 0
 
