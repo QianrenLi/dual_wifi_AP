@@ -281,7 +281,6 @@ class SACRNNBeliefSeq(PolicyBase):
             h0, b0 = self.net.init_hidden(B, self.device)
             if self._belief_h is None or self._belief_h.shape[1] != B:
                 self._belief_h = b0.clone()
-                
 
             # ---- Belief sequence (TRAIN) ----
             B = obs_TBD.size(1)
@@ -292,12 +291,12 @@ class SACRNNBeliefSeq(PolicyBase):
             interf_B1 = info["interference"]               # [B,1], episode-level label
             iw_B1     = info["is_weights"].detach()        # [B,1]
 
-            y_last_B1   = y_hat_TB1[-1]                    # [B,1]
-            mu_last_BH  = mu_TB1[-1]                       # [B,H]
-            logv_last_BH= logvar_TB1[-1]                   # [B,H]
+            # y_last_B1   = y_hat_TB1[-1]                    # [B,1]
+            # mu_last_BH  = mu_TB1[-1]                       # [B,H]
+            # logv_last_BH= logvar_TB1[-1]                   # [B,H]
 
-            mse_loss = ((y_last_B1 - interf_B1).pow(2) * iw_B1).mean()
-            kl_loss  = (0.5 * (mu_last_BH.pow(2) + logv_last_BH.exp() - logv_last_BH - 1.0)).mean()
+            mse_loss = ((y_hat_TB1 - interf_B1).pow(2).mean(dim=(0,2)) * iw_B1).mean()
+            kl_loss  = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
             beta     = self.annealing_bl(epoch, 100)
             b_loss   = mse_loss + beta * kl_loss
             b_loss = mse_loss
@@ -323,8 +322,7 @@ class SACRNNBeliefSeq(PolicyBase):
                 diff = diff / self.buf.sigma
                 c_loss_per_t = diff.pow(2).mean(dim=0)          # [T,B,1]
                 c_loss_batch = c_loss_per_t.mean(dim=(0,2))     # [B]
-                
-                c_loss = (c_loss_batch * importance_weights ).mean() / (importance_weights.mean() + 1e-8 )
+                c_loss = (c_loss_batch * importance_weights ).mean()
                 
                 if is_batch_rl:
                     critic_td_only = c_loss.detach()

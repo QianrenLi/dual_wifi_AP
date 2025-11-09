@@ -78,7 +78,6 @@ class TraceWatcher:
 
         for p in to_load:
             self._seen.add(str(p.resolve()))
-        print(to_load)
         return self._load_units(to_load)
 
     def poll_new_paths(self, max_step: Optional[int] = None) -> List[Path]:
@@ -185,6 +184,10 @@ class TraceWatcher:
                 state_descriptor=self.control_config.get("state_cfg", None),
                 reward_descriptor=self.control_config.get("reward_cfg", None),
             )
+            s_nor = []
+            for _s in s:
+                s_nor.append(self._state_tf.apply_to_list(_s))
+            s = s_nor
             merged.append((s, a, r, net))
         return merged, interference_vals
 

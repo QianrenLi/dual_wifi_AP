@@ -43,20 +43,46 @@ def _inflate_dataclass_from_manifest(cls, manifest: Dict[str, Any]) -> Any:
 
 def _flatten_params(m: Optional[th.nn.Module]) -> th.Tensor:
     if m is None: return th.zeros(0)
+    if isinstance(m , list):
+        parts = [p.detach().view(-1).cpu() for p in m if p.requires_grad]
+        return th.cat(parts) if parts else th.zeros(0)
     parts = [p.detach().view(-1).cpu() for p in m.parameters() if p.requires_grad]
     return th.cat(parts) if parts else th.zeros(0)
+
+def _normalize_trace_paths(arg) -> List[str]:
+    """
+    Accept either:
+      - list via argparse nargs='+' (e.g., ["A", "B"])
+      - entries that may themselves be comma-separated (e.g., "A,B")
+      - a single string "A,B" if user passes it as one token
+    Returns a flat list of non-empty strings.
+    """
+    if isinstance(arg, str):
+        return [p for p in (s.strip() for s in arg.split(",")) if p]
+    out: List[str] = []
+    for item in arg:
+        parts = [p.strip() for p in str(item).split(",")]
+        out.extend(p for p in parts if p)
+    return out
 
 
 # ----------------------------- Main -----------------------------
 def main():
     ap = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
     ap.add_argument("--control_config", required=True)
-    ap.add_argument("--trace_path", required=True, help="Root folder to watch; all **/*.jsonl included")
+    ap.add_argument(
+        "--trace_path",
+        required=True,
+        nargs="+",
+        help="One or more root folders to watch; all **/*.jsonl under each will be included",
+    )
     ap.add_argument("--load_path", default=None)
     ap.add_argument("--delta-min", type=float, default=5e-4)
     ap.add_argument("--delta-max", type=float, default=5)
+    ap.add_argument("--batch-rl", action = 'store_true')
     args = ap.parse_args()
 
+    cfg_stem = Path(args.control_config).parent.stem
     with open(args.control_config, "r", encoding="utf-8") as f:
         control_cfg = json.load(f)
 
@@ -68,31 +94,36 @@ def main():
     roll_cfg = control_cfg["rollout_cfg"]
     BufferCls = BUFFER_REGISTRY[roll_cfg["buffer_name"]]
 
-    # Trace watcher (single root, recursive *.jsonl)
-    watcher = TraceWatcher(args.trace_path, control_cfg, max_step=10)
+    # Trace watcher (multi-root, recursive *.jsonl)
+    roots = _normalize_trace_paths(args.trace_path)
+    watcher = TraceWatcher(roots, control_cfg, max_step=10)
     init_traces, interference_vals = watcher.load_initial_traces()
     while init_traces == []:
         init_traces, interference_vals = watcher.load_initial_traces()
         time.sleep(1)
     
     # Build buffer
+    writer = SummaryWriter(f"net_util/logs/{cfg_stem}")
     buf = BufferCls.build_from_traces(
         init_traces,
         device="cuda",
         advantage_estimator=roll_cfg.get("advantage_estimator"),
-        gamma=roll_cfg.get("gamma"),
+        gamma=pol_manifest.get("gamma"),
         lam=roll_cfg.get("lam"),
         reward_agg=roll_cfg.get("reward_agg", "sum"),
         buffer_max=roll_cfg.get("buffer_max", 10_000_000),
-        interference_vals = interference_vals
+        interference_vals = interference_vals,
+        writer = writer
     )
 
     # Policy
     pol_cfg = _inflate_dataclass_from_manifest(PolicyCfg, pol_manifest)
+    if args.batch_rl:
+        pol_cfg.batch_rl = True
+        
     policy: PolicyBase = PolicyCls(ControlCmd, pol_cfg, rollout_buffer=buf, device="cuda")
 
     # Checkpoint pathing
-    cfg_stem = Path(args.control_config).parent.stem
     if not args.load_path or str(args.load_path).lower() == "none":
         ckpt_dir = Path("net_util/net_cp") / cfg_stem
         next_id = 1
@@ -106,8 +137,7 @@ def main():
     # policy.load(latest_path, device="cuda")
 
     # TB + training
-    writer = SummaryWriter(f"net_util/logs/{cfg_stem}")
-    actor_before = _flatten_params(getattr(policy, "net", None))
+    actor_before = _flatten_params(policy.net.mu)
 
     def _extend_with_new():
         new_traces, interference_vals = watcher.poll_new_traces()
@@ -117,7 +147,7 @@ def main():
                 device="cuda",
                 reward_agg=roll_cfg.get("reward_agg", "sum"),
                 advantage_estimator=roll_cfg.get("advantage_estimator"),
-                gamma=roll_cfg.get("gamma"),
+                gamma=pol_manifest.get("gamma"),
                 lam=roll_cfg.get("lam"),
                 interference_vals = interference_vals,
             )
@@ -129,16 +159,21 @@ def main():
     last_trained_time = time.time()
     while True:
         # start_time = time.time()
-        trained = policy.train_per_epoch(epoch, writer=writer)
+        if args.batch_rl:
+            for _ in range(10):
+                trained = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
+        else:
+            trained = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
+        
         # print(time.time() - start_time)
         _extend_with_new()
-        
         if not trained:
-            time.sleep(30)
+            time.sleep(1)
             continue
+        epoch += 1
         
         # Actor drift
-        actor_after = _flatten_params(getattr(policy, "net", None))
+        actor_after = _flatten_params(policy.net.mu)
         delta = float((actor_after - actor_before).norm(p=2).item())
         writer.add_scalar("params/delta_actor_epoch_L2", delta, epoch)
 
@@ -153,8 +188,6 @@ def main():
             policy.save(store_path)
             next_id += 1
             store_path = ckpt_dir / f"{next_id}.pt"
-
-        epoch += 1
 
 
 if __name__ == "__main__":

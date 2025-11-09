@@ -305,6 +305,7 @@ def main():
     reward_totals = []    # for bar plot
     tputs_totals = []
     outage_totals = []
+    belief_totals = []
 
     for folder in args.folders:
         root = Path(folder)
@@ -332,6 +333,7 @@ def main():
         total_reward = []
         tput = []
         outage = []
+        beliefs = []
         if ro_path:
             try:
                 with ro_path.open("r", encoding="utf-8", errors="ignore") as fh:
@@ -346,6 +348,7 @@ def main():
                         total_reward.append(compute_reward(rec, reward_cfg, agg=args.agg))
                         tput.append(rec['stats']['flow_stat']['6203@128']['throughput'])
                         outage.append(rec['stats']['flow_stat']['6203@128']['outage_rate'])
+                        beliefs.append(rec['res']['belief'][0])
             except Exception as e:
                 print(f"[warn] Failed reading rewards in {root}: {e}")
         else:
@@ -353,6 +356,7 @@ def main():
         reward_totals.append( np.mean(total_reward) )
         tputs_totals.append(np.mean(tput))
         outage_totals.append(np.mean(outage))
+        belief_totals.append(np.mean(beliefs))
 
     # ---- Build channel distributions and plot ----
     ch0_distributions = build_channel_distributions(stats_list, channel=0)
@@ -395,6 +399,16 @@ def main():
         out_path=str(out_dir / "outage.png"),
         ylabel="Average Outage"
     )
+    
+
+    plot_reward_bar(
+        reward_totals=belief_totals,
+        folder_names=[0,1,2,3],
+        title=f"",
+        out_path=str(out_dir / "belief.png"),
+        ylabel="Average Outage"
+    )
+    
 
     # ---- Console summary ----
     print("\nSaved plots:")

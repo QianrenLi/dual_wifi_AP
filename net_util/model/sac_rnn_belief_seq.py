@@ -161,10 +161,8 @@ class Network(nn.Module):
         # 2) Encode the next sequence with target encoder from zero state
         feat_n_TBH, _ = self.encode_target_seq(nxt_TBD, belief_TB1, h0_tgt)   # [T,B,H]
 
-        # 4) Actor heads in fp32 (your _mean_std already does fp32 math + clamps)
         mu, std = self._mean_std(feat_n_TBH)
 
-        # 5) Build the distribution without extra validation (we clamp already)
         dist = th.distributions.Normal(mu, std, validate_args=False)
         u = dist.rsample()
         a_n = th.tanh(u)
