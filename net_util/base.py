@@ -59,7 +59,7 @@ class PolicyBase:
             obs = self._state_tf.apply_to_list(obs)
         return obs
 
-    def train_per_epoch(self, epoch, writer=None):
+    def train_per_epoch(self, epoch, writer=None, is_batch_rl = False):
         raise NotImplementedError
 
     def save(self, path: str):
