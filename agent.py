@@ -161,7 +161,7 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
 
     ctrl = ipc_control(cfg.server_ip, cfg.server_port, cfg.local_port, link_name="agent")
 
-    last_action = [0, 0, 0, 0, 0]
+    last_action = [0] * policy.action_dim
     # Duration control
     first_ok_stats_t: Optional[float] = None
     with open(jsonl_path, "w", encoding="utf-8") as jf:

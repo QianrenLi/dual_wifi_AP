@@ -139,7 +139,7 @@ def pull_rtt_logs(folder: Path, tx_flows: Flows, log_dir: Path = Path("stream-re
         (log_dir / fname).unlink(missing_ok=True)
 
 
-def move_rollout_from_tx(folder: Path, tx_srcs: TxSrcs):
+def move_rollout_from_tx(folder: Path, tx_srcs: TxSrcs, is_evaluate: bool):
     """Move logs/agent/rollout.jsonl into this trial folder (from any tx host)."""
     # original code just renames local file without an explicit sync per tx
     # preserve that behavior
@@ -150,12 +150,13 @@ def move_rollout_from_tx(folder: Path, tx_srcs: TxSrcs):
             rollout.rename(folder / "rollout.jsonl")
             break
     
-    # output_log = Path("stream-replay/log/output.log")
-    # for tx in tx_srcs.keys():
-    #     Connector(tx).sync_file("stream-replay/log/output.log")
-    #     if output_log.exists():
-    #         output_log.rename(folder / "output.log")
-    #         break
+    if is_evaluate:
+        output_log = Path("stream-replay/log/output.log")
+        for tx in tx_srcs.keys():
+            Connector(tx).sync_file("stream-replay/log/output.log")
+            if output_log.exists():
+                output_log.rename(folder / "output.log")
+                break
 
 
 def push_rollout_to_trainer(folder: Path):
@@ -166,9 +167,9 @@ def push_rollout_to_trainer(folder: Path):
 
 
 def train_forever(conn: Connector, control_config: str, trace: Path, maybe_load: Path | None = None):
-    # Connector("TrainAgent").killproc("train_rl.py", signal="-TERM")
-    # print("clean up")
-    # time.sleep(2)
+    Connector("TrainAgent").killproc("train_rl.py", signal="-TERM")
+    print("clean up")
+    time.sleep(2)
     args = {"control_config": control_config, "trace_path": trace}
     if maybe_load is not None:
         args["load_path"] = str(maybe_load)
@@ -220,6 +221,7 @@ def run_iteration(
     traces: List[Path],
     max_traces: int,
     int_level: int = 0,
+    is_evaluate = False
 ):
     start_t = time.time()
 
@@ -245,7 +247,7 @@ def run_iteration(
     # 4) collect artifacts
     folder = now_trial_folder(exp_name, interference_level=int_level)
     pull_rtt_logs(folder, tx_flows)
-    move_rollout_from_tx(folder, tx_srcs)
+    move_rollout_from_tx(folder, tx_srcs, is_evaluate)
     
     # 5) training (only in train mode)
     if not args.evaluate:
@@ -257,8 +259,8 @@ def run_iteration(
             traces.pop(0)
             
         # 6) pull new model & logs
-        if iteration > 2:
-            pull_trainer_artifacts(exp_name)
+        # if iteration > 2:
+        pull_trainer_artifacts(exp_name)
             
         end_t = time.time()
 
@@ -283,8 +285,8 @@ def train_loop(
     exp_name: str,
 ):
     def path_id(iteration):
-        # return (iteration // args.per_exp_trials) % len(paths)
-        return random.randint(0, len(paths) - 1)
+        return (iteration // args.per_exp_trials) % len(paths)
+        # return random.randint(0, len(paths) - 1)
         
     traces: List[Path] = []
     max_traces = 1
@@ -296,12 +298,12 @@ def train_loop(
     print(f"Train config {path}")
     tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
     
-    if iteration == 0:
-        clean_first_iteration(exp_name)
+    # if iteration == 0:
+        # clean_first_iteration(exp_name)
 
     any_tx = next(iter(tx_srcs))
     control_cfg = tx_srcs[any_tx]["control_config"]
-    train_forever(conn, control_cfg, f'exp_trace/{exp_name}', None)
+    # train_forever(conn, control_cfg, f'exp_trace/{exp_name}', None)
     
     while True:
         if iteration % args.per_exp_trials == 0:
@@ -329,7 +331,7 @@ def evaluate(
         tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
         _ = run_iteration(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
-            duration, exp_name, iteration=0, traces=[], max_traces=1, int_level=int_level
+            duration, exp_name, iteration=0, traces=[], max_traces=1, int_level=int_level, is_evaluate=True
             )
 
 
