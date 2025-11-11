@@ -54,7 +54,8 @@ class CListFloat:
     """Base class: a list of floats with constraints."""
     dim: int = None
     value_range: tuple = (None, None)  # (low, high)
-
+    active = None
+    
     def __init__(self, values: List[float]):
         if not isinstance(values, list):
             raise TypeError("Must be a list of floats")
@@ -70,7 +71,21 @@ class CListFloat:
                 value = hi
             clipped.append(value)
             
-        self.values = clipped
+        mask = self.active
+        if mask:
+            # Validate mask.
+            if not isinstance(mask, list) or not all(m in (0, 1) for m in mask):
+                raise TypeError("active must be a list of 0/1")
+            if sum(mask) != self.dim:
+                raise ValueError(f"active must contain exactly {self.dim} ones")
+            fill_inactive = lo if lo is not None else 0.0
+            it = iter(clipped)
+            out: List[float] = []
+            for m in mask:
+                out.append(next(it) if m == 1 else fill_inactive)
+            self.values = out
+        else:
+            self.values = clipped
 
     def to_jsonable(self):
         return self.values
@@ -143,6 +158,12 @@ class C_LIST_FLOAT_DIM4_0_500(CListFloat):
     value_range = (0.0, 500)
     
 @register_jo()
+class C_LIST_FLOAT_DIM2_0_1(CListFloat):
+    dim = 2
+    active = [0, 0, 1, 1]
+    value_range = (0.0, 1.0)
+    
+@register_jo()
 class C_LIST_FLOAT_DIM3_0_500(CListFloat):
     dim = 3
     value_range = (0.0, 500)
@@ -163,7 +184,7 @@ class C_INT_RANGE_0_13_TypeII(CIntTypeII):
 @register_jo()
 @dataclass
 class ControlCmd:
-    policy_parameters: C_LIST_FLOAT_DIM3_0_10
+    policy_parameters: C_LIST_FLOAT_DIM2_0_1
     version: C_INT_RANGE_0_13
     
     @staticmethod
