@@ -5,7 +5,6 @@ import json
 import numpy as np
 from typing import Any, Callable, Dict, Optional, Union, Mapping, Tuple, List, Iterable
 
-from util.control_cmd import _json_object_hook
 from util.filter_rule import FILTER_REGISTRY
 
 # ----------------------------- Types ----------------------------- #
@@ -347,7 +346,7 @@ def trace_collec(
     reward_descriptor: Optional[Descriptor] = None
 ):
     with open(json_file, "r") as f:
-        trace_items = [json.loads(line, object_hook=_json_object_hook) for line in f]
+        trace_items = [json.loads(line) for line in f]
 
     actions = [flatten_leaves(t.get("res").get("action")) for t in trace_items]
     states  = [flatten_leaves(trace_filter(t, state_descriptor))  for t in trace_items]
@@ -392,8 +391,8 @@ if __name__ == "__main__":
         }
     }
     
-    s, a, r, n = trace_collec( '/home/lassso/workspace/dual_wifi_AP/exp_trace/rnn_belief_net_500_v4/IL_0_trial_20251024-132102/rollout.jsonl' ,state_descriptor=STATE_DESCRIPTOR, reward_descriptor=REWARD_DESCRIPTOR)
-    print(len(s[0]))
+    s, a, r, n = trace_collec( '/home/qianren/workspace/dual_wifi_AP/exp_trace/rnn_2000_p3_5/IL_0_trial_20251109-135311/rollout.jsonl' ,state_descriptor=STATE_DESCRIPTOR, reward_descriptor=REWARD_DESCRIPTOR)
+    print(a[0])
     
     #################
     # example_js_str = '''
