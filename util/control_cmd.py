@@ -17,19 +17,6 @@ def register_jo(name: str | None = None):
         return obj
     return _decorator
 
-def revive_jsonlike(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        # First, recursively revive children
-        revived = {k: revive_jsonlike(v) for k, v in obj.items()}
-        # Then, give the dict to your hook (so it can detect __class__/__data__)
-        return _json_object_hook(revived)
-    elif isinstance(obj, list):
-        return [revive_jsonlike(v) for v in obj]
-    elif isinstance(obj, tuple):
-        return tuple(revive_jsonlike(v) for v in obj)
-    else:
-        return obj
-
 def _json_default(o):
     if hasattr(o, "to_jsonable"):
         return {"__class__": o.__class__.__name__, "__data__": o.to_jsonable()}
@@ -37,17 +24,6 @@ def _json_default(o):
         return {"__class__": o.__class__.__name__,
                 "__data__": {f.name: getattr(o, f.name) for f in dataclasses.fields(o)}}
     raise TypeError
-
-def _json_object_hook(dct):
-    if "__class__" in dct and "__data__" in dct:
-        clsname, data = dct["__class__"], dct["__data__"]
-        # Note: `data` is already decoded (object_hook is recursive).
-        maker = _JO_REGISTRY.get(clsname)
-        if maker:
-            return maker(data)
-        # fallback: return raw
-        return {"__class__": clsname, "__data__": data}
-    return dct
 
 @register_jo()
 class CListFloat:
@@ -89,7 +65,7 @@ class CListFloat:
 
     def to_jsonable(self):
         return self.values
-
+    
     def __repr__(self):
         return f"{self.__class__.__name__}({self.values})"
     

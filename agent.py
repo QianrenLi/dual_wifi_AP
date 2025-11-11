@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, get_args, get_origin, Union
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from net_util.base import PolicyBase
 from util.ipc import ipc_control  # noqa: E402
-from util.control_cmd import ControlCmd, _json_default, revive_jsonlike  # noqa: E402
+from util.control_cmd import ControlCmd, _json_default  # noqa: E402
 from util.trace_collec import trace_filter, flatten_leaves, create_obs
 from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY
 
@@ -100,7 +100,6 @@ class AgentConfig:
     fail_fast: bool
     out_dir: Path
     duration: Optional[float] = None  # seconds; if set, overrides iterations
-    default_cmd: Optional[Dict] = None
 
 
 class GracefulExit(Exception):
@@ -202,15 +201,11 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
             obs_for_policy = create_obs(states, 0, last_action, last_rewards)
             
             # 2) Base action + stochastic exploration
-            if cfg.default_cmd is not None:
-                control_cmd:ControlCmd = revive_jsonlike(cfg.default_cmd)
-                res = None
-            else:
-                try:
-                    res, control_cmd = policy.act(obs_for_policy, is_eval)
-                except Exception as e:
-                    print(e)
-                    continue
+            try:
+                res, control_cmd = policy.act(obs_for_policy, is_eval)
+            except Exception as e:
+                print(e)
+                continue
                 
             # Build ControlCmd using canonical mapping (pads/trims internally)
             control_body: Dict[str, ControlCmd] = {}
