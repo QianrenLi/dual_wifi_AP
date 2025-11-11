@@ -1,256 +1,199 @@
-from typing import Any, Dict, Iterable, Optional, Callable, Union
 from util.trace_collec import trace_filter, flatten_leaves  # your project utilities
-
+from exp_trace.util import ExpTraceReader, Rollout, FolderRollout, FolderChannel, ChannelLog
+from typing import Any, Dict, Iterable, Callable, Union, List, Sequence, Optional, Tuple
 import numpy as np
+import matplotlib.pyplot as plt
+
 
 Agg = Union[str, Callable[[Iterable[float]], float]]  # "sum" | "mean" | custom reducer
 
-def compute_reward(
-    record: Dict[str, Any],
-    reward_cfg: Optional[Dict[str, Any]],
-    agg: Agg = "sum",
-) -> float:
-    """
-    Compute reward for a single rollout record.
+import matplotlib
+plt.rcParams.update({
+    # "text.usetex": True,
+    "font.family": "sans-serif",
+    "font.sans-serif": "Helvetica",
+})
+matplotlib.rcParams['mathtext.fontset'] = 'stix'
+matplotlib.rcParams['font.family'] = 'STIXGeneral'
 
-    Parameters
-    ----------
-    record : dict
-        One parsed JSON line (a rollout record).
-    reward_cfg : dict | None
-        The `reward_cfg` object (e.g., from control_config.json). If None, returns 0.0.
-    agg : {"sum","mean"} or callable
-        How to aggregate the leaf values returned by `flatten_leaves`.
-        - "sum"  -> sum of leaves (default)
-        - "mean" -> average of leaves
-        - callable(iterable[float]) -> custom reducer
+def _flatten_dict_of_lists(d: Dict[str, List[float]]) -> np.ndarray:
+    if not d:
+        return np.array([], dtype=float)
+    parts = []
+    for v in d.values():
+        a = np.asarray(v, dtype=float)
+        parts.append(a)
+    return np.concatenate(parts) if parts else np.array([], dtype=float)
 
-    Returns
-    -------
-    float
-        The computed reward.
-    """
-    if not isinstance(record, dict) or not reward_cfg:
-        return 0.0
+def _agg_vals(arr: np.ndarray, mode: str = "mean") -> float:
+    if arr.size == 0:
+        return float("nan")
+    if mode == "mean":
+        return float(np.nanmean(arr))
+    if mode == "median":
+        return float(np.nanmedian(arr))
+    if mode == "sum":
+        return float(np.nansum(arr))
+    # default
+    return float(np.nanmean(arr))
 
-    try:
-        filtered = trace_filter(record, reward_cfg)
-        leaves = flatten_leaves(filtered)
-    except Exception:
-        # Be defensive: if filtering/flattening fails, treat as zero reward
-        return 0.0
-
-    if not leaves:
-        return 0.0
-
-    if callable(agg):
-        try:
-            return float(agg(leaves))
-        except Exception:
-            return 0.0
-
-    if agg == "mean":
-        return float(sum(leaves) / len(leaves))
-    # default: "sum"
-    return float(sum(leaves))
-
-
-def compute_channel_stats(log_path: str):
-    """
-    Read a .log file with lines like: "INFO - <channel>, <seq>".
-
-    Returns a dict with:
-      - distribution: {channel: {"count": int, "percent": float}, ...}   # overall counts
-      - seq_hist:     {channel: {seq: count, ...}, ...}                  # per-seq counts per channel
-      - total:        int                                                # total parsed pairs
-      - seq_totals:   {seq: total_count_for_that_seq}
-      - seq_ch0:      {seq: count_of_channel0_for_that_seq}
-      - seq_ch0_frac: {seq: ch0_count/total_count_for_that_seq}          # fraction of channel 0 per seq
-      - ch0_fraction_list: [ch0_fraction_per_seq, ...]                   # convenient list for box plots
-    """
-    import re
-    from collections import Counter, defaultdict
-
-    pair_re = re.compile(r"INFO\s*-\s*(\d+)\s*,\s*(\d+)")
-    ch_counts = Counter()                 # overall per-channel counts
-    seq_hist = defaultdict(Counter)       # seq_hist[channel][seq] -> count
-    seq_totals = Counter()                # total observations per seq
-    seq_ch0 = Counter()                   # channel 0 observations per seq
-
-    total = 0
-    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            m = pair_re.search(line)
-            if not m:
+def _collect_pct_from_logs(logs: List["ChannelLog"]) -> tuple[np.ndarray, np.ndarray]:
+    """Aggregate per-seq percentages (% units) across multiple ChannelLog objects."""
+    pct0_all, pct1_all = [], []
+    for lg in logs:
+        per_seq = lg.get_interface_percentages()  # {seq: [pct0, pct1]}
+        pct0_all.append([])
+        for _, pair in per_seq.items():
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
                 continue
-            ch = int(m.group(1))
-            seq = int(m.group(2))
-
-            ch_counts[ch] += 1
-            seq_hist[ch][seq] += 1
-
-            seq_totals[seq] += 1
-            if ch == 0:
-                seq_ch0[seq] += 1
-
-            total += 1
-
-    # overall distribution
-    denom = max(total, 1)
-    distribution = {
-        ch: {"count": cnt, "percent": 100.0 * cnt / denom}
-        for ch, cnt in sorted(ch_counts.items())
-    }
-
-    # convert nested Counters to plain dicts (sorted by seq)
-    seq_hist_plain = {ch: dict(sorted(c.items())) for ch, c in seq_hist.items()}
-
-    # per-seq channel-0 fraction
-    seq_ch0_frac = {}
-    for s, tot in seq_totals.items():
-        if tot > 0:
-            seq_ch0_frac[s] = float(seq_ch0.get(s, 0)) / float(tot)
-        else:
-            seq_ch0_frac[s] = 0.0
-
-    ch0_fraction_list = [seq_ch0_frac[s] for s in sorted(seq_ch0_frac.keys())]
-
-    return {
-        "distribution": distribution,
-        "seq_hist": seq_hist_plain,
-        "total": total if total != 1 or sum(ch_counts.values()) == 1 else 0,
-        "seq_totals": dict(sorted(seq_totals.items())),
-        "seq_ch0": dict(sorted(seq_ch0.items())),
-        "seq_ch0_frac": dict(sorted(seq_ch0_frac.items())),
-        "ch0_fraction_list": ch0_fraction_list,  # <- feed this to your box plot
-    }
+            a, b = float(pair[0]), float(pair[1])
+            if np.isfinite(a):
+                pct0_all[-1].append(a)
+        pct0_all[-1] = np.array(pct0_all[-1])
+    return pct0_all
 
 
-import matplotlib.pyplot as plt
+def summarize_rollouts_for_bars(rollouts: List["Rollout"], agg: str = "mean"):
+    thr_vals, out_vals, reward_vals = [], [], []
+    for r in rollouts:
+        thr_arr = _flatten_dict_of_lists(r.throughput)  # dict[link]->list[float]
+        out_arr = _flatten_dict_of_lists(r.outage)      # dict[link]->list[float]
+        reward_arr = np.array(r.optional_data['reward'])
+        thr_vals.append(_agg_vals(thr_arr, agg))
+        out_vals.append(_agg_vals(out_arr, agg))
+        reward_vals.append(_agg_vals(reward_arr))
+    return thr_vals, out_vals, reward_vals
 
-def plot_channel_box(ch_distributions, folder_names, title=None, out_path=None, showfliers=False):
+# ------------------------------- Plotting ------------------------------- #
+def plot_interface_percentages_boxplot(
+    logs: List["ChannelLog"],
+    labels: Sequence[str] = ("Interface 0", "Interface 1"),
+    title: Optional[str] = "Interface usage per sequence (aggregated)",
+    ylabel: Optional[str] = "Percentage per seq (%)",
+    show_points: bool = True,
+    point_alpha: float = 0.6,
+    jitter: float = 0.10,
+    save_path: Optional[str] = None,
+):
     """
-    Box plot for per-folder channel distributions.
+    Box plot of per-seq interface percentages, aggregated over a list of ChannelLog.
+
+    Each log contributes its per-seq percentages (from get_interface_percentages()).
+    The distributions for IF0 and IF1 are then shown as two boxes.
 
     Parameters
     ----------
-    ch_distributions : List[List[int]]
-        For each folder, a list of per-seq counts for the chosen channel.
-        Example: [[3,2,1], [5,1], ...] aligned with folder_names.
-    folder_names : List[str]
-        Labels for x-axis, one per folder.
-    title : str | None
-        Optional plot title.
-    out_path : str | None
-        If provided, save the figure to this path. Otherwise just return ax.
-    showfliers : bool
-        Whether to show outliers (points outside whiskers).
-
-    Returns
-    -------
-    ax : matplotlib.axes.Axes
+    logs : List[ChannelLog]
+        Input logs to aggregate.
+    labels : tuple[str, str]
+        Box labels for the two interfaces.
+    title, ylabel : str | None
+        Plot title and y-axis label.
+    show_points : bool
+        Overlay jittered per-seq points.
+    point_alpha : float
+        Alpha for the scatter points.
+    jitter : float
+        Horizontal jitter width for scatter points.
+    save_path : str | None
+        If provided, saves the figure; otherwise returns (fig, ax).
     """
+    pct0 = _collect_pct_from_logs(logs)
+    data = pct0
+
     fig, ax = plt.subplots()
-    ax.boxplot(ch_distributions, labels=folder_names, showfliers=showfliers)
-    ax.set_xlabel("Folder")
-    ax.set_ylabel("Per-seq count")
+    bp = ax.boxplot(
+        data,
+        labels=list(labels),
+        showfliers=False,
+        patch_artist=False,
+    )
+
+    # Optional scatter overlay for distribution intuition
+    if show_points:
+        rng = np.random.default_rng(0)  # reproducible jitter
+        for i, arr in enumerate(data, start=1):
+            if arr.size == 0:
+                continue
+            xs = i + rng.uniform(-jitter, jitter, size=arr.size)
+            ax.scatter(xs, arr, alpha=point_alpha, s=18, zorder=3, edgecolors="none")
+
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=13)
     if title:
-        ax.set_title(title)
-    plt.xticks(rotation=30, ha="right")
-    plt.tight_layout()
-    if out_path:
-        plt.savefig(out_path, dpi=150)
+        ax.set_title(title, fontsize=14)
+
+    # Cosmetics similar to your bar style
+    ax.grid(True, axis="y", linestyle="--", alpha=0.4, zorder=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="x", labelsize=12)
+    ax.tick_params(axis="y", labelsize=12)
+    # plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
         plt.close(fig)
-    return ax
+        print(f"Save to {save_path}")
+        return None
+    return fig, ax
 
-
-def plot_reward_bar(reward_totals, folder_names, title=None, out_path=None, ylabel = None):
-    """
-    Bar plot for per-folder total rewards.
-
-    Parameters
-    ----------
-    reward_totals : List[float]
-        Total reward per folder, aligned with folder_names.
-    folder_names : List[str]
-        Labels for x-axis, one per folder.
-    title : str | None
-        Optional plot title.
-    out_path : str | None
-        If provided, save the figure to this path. Otherwise just return ax.
-
-    Returns
-    -------
-    ax : matplotlib.axes.Axes
-    """
+def plot_bar_simple(
+    values: Sequence[float],
+    labels: Sequence[str],
+    title: Optional[str] = None,
+    ylabel: Optional[str] = None,
+    annotate: bool = True,
+    rotation: int = 0,
+    save_path: Optional[str] = None,
+):
+    x = np.arange(len(labels))
     fig, ax = plt.subplots()
-    bars = ax.bar(range(len(folder_names)), reward_totals, tick_label=folder_names,             color="cyan",
-            edgecolor="black",
-            hatch= "//",
-            alpha= 0.9,
-            # width=0.08,
-            linewidth=1.0,
-            zorder=3,)
-    # ax.set_xlabel("Folder")
-    ax.set_ylabel(ylabel, fontsize=18) if ylabel else ax.set_ylabel("Total reward")
+    
+    total_bar_span = 3
+    width = total_bar_span / max(len(labels), 1)
+    bars = ax.bar(
+        x, values,
+        width=width * 0.9,          # a touch slimmer than the slot share
+        color="cyan",
+        edgecolor="black",
+        hatch="///",
+        alpha=0.9,
+        linewidth=0.8,
+    )
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=18)
     if title:
         ax.set_title(title)
-    plt.xticks(rotation=30, ha="right")
-    plt.tight_layout()
+    ax.set_xticks(x, labels)
+    plt.setp(ax.get_xticklabels(), rotation=rotation)
 
-    # Add value labels with slight offset
-    for rect in bars:
-        height = rect.get_height()
-        ax.text(
-            rect.get_x() + rect.get_width() / 2.0,
-            height + 0.01 * max(reward_totals),  # small offset above bar
-            f"{height:.2f}",
-            ha="center",
-            va="bottom",
-            fontsize=14,
-            weight="bold",
-        )
-
-    # Make it pretty: subtle grid + clean axes
     ax.grid(True, axis="y", linestyle="--", alpha=0.4, zorder=0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(axis="x", labelsize=14)
     ax.tick_params(axis="y", labelsize=14)
-    # ax.set_xlim([-0.25, 0.5])
-    # ax.set_ylim(bottom = 9)
-        
-    if out_path:
-        plt.savefig(out_path, dpi=150)
+
+    if annotate and len(values) > 0:
+        vmax = np.nanmax(values)
+        offset = 0.01 * (vmax if np.isfinite(vmax) else 1.0)
+        for rect, v in zip(bars, values):
+            label = "NaN" if not np.isfinite(v) else f"{v:.2f}"
+            y = rect.get_height() if not np.isfinite(v) else v
+            ax.text(
+                rect.get_x() + rect.get_width()/2.0,
+                y + offset,
+                label,
+                ha="center", va="bottom",
+                fontsize=14, fontweight="bold"
+            )
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
         plt.close(fig)
-    return ax
-
-
-# -------- Optional helper to build input for plot_channel_box --------
-def build_channel_distributions(stats_list, channel):
-    """
-    Convert a list of compute_channel_stats(...) results into the
-    ch_distributions expected by plot_channel_box for a given channel.
-
-    Parameters
-    ----------
-    stats_list : List[dict]
-        Each item is the dict returned by compute_channel_stats(log_path).
-    channel : int
-        0 or 1 (or any channel key present).
-
-    Returns
-    -------
-    List[List[int]]
-        Each element is a list of per-seq counts for that folder.
-    """
-    out = []
-    for stats in stats_list:
-        arr = stats.get("ch0_fraction_list", [])
-        out.append(arr if arr else [0])
-    return out
-
-
+        print(f"Save to {save_path}")
+        return None
+    return fig, ax
 
 #!/usr/bin/env python3
 def main():
@@ -272,7 +215,7 @@ def main():
 
     # ---- CLI ----
     p = argparse.ArgumentParser(description="Channel box plots and reward bar plot across folders.")
-    p.add_argument("--folders", nargs="+", help="Folders to process (each with output.log and rollout.jsonl/roolout.jsonl)")
+    p.add_argument("--meta-folder", required=True, help="One or more meta-folders to scan.")
     p.add_argument("--control-config", required=True, help="Path to control_config.json containing {'reward_cfg': ...}")
     p.add_argument("--agg", choices=["sum", "mean"], default="mean", help="Aggregation used in compute_reward (default: sum)")
     p.add_argument("--out-dir", default="plots", help="Directory to save generated plots (default: plots)")
@@ -287,135 +230,66 @@ def main():
     except Exception as e:
         print(f"[error] Failed to read control-config '{cfg_path}': {e}")
         return
+    
+    def compute_reward(
+        record: Dict[str, Any],
+        agg: Agg = "sum",
+    ) -> float:
+        if not isinstance(record, dict) or not reward_cfg:
+            return 0.0
+        try:
+            filtered = trace_filter(record, reward_cfg)
+            leaves = flatten_leaves(filtered)
+        except Exception:
+            # Be defensive: if filtering/flattening fails, treat as zero reward
+            return 0.0
+
+        if not leaves:
+            return 0.0
+
+        if callable(agg):
+            try:
+                return float(agg(leaves))
+            except Exception:
+                return 0.0
+
+        if agg == "mean":
+            return float(sum(leaves) / len(leaves))
+        # default: "sum"
+        return float(sum(leaves))
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    def _find_rollout(folder: Path):
-        # Accept common typo too
-        for name in ("rollout.jsonl", "roolout.jsonl"):
-            pth = folder / name
-            if pth.exists():
-                return pth
-        return None
+    data_reader = ExpTraceReader(args.meta_folder)
 
-    # ---- Collect per-folder stats ----
-    folder_names = []
-    stats_list = []       # for box plots (channel 0/1)
-    reward_totals = []    # for bar plot
-    tputs_totals = []
-    outage_totals = []
-    belief_totals = []
+    rollouts = []
+    il_ids = []
+    seq_interface = []
+    for il_id, run_folder in sorted(data_reader.latest_folders.items()):
+        il_ids.append(il_id)
+        
+        rollout = Rollout(FolderRollout(run_folder), {'reward': compute_reward})
+        rollouts.append(rollout)
+        
+        try:
+            channel = ChannelLog(FolderChannel(run_folder))
+            seq_interface.append(channel)
+        except:
+            continue            
 
-    for folder in args.folders:
-        root = Path(folder)
-        if not root.is_dir():
-            print(f"[warn] Skip non-directory: {root}")
-            continue
-
-        folder_names.append(root.name)
-
-        # # Channel stats
-        # log_path = root / "output.log"
-        # if log_path.exists():
-        #     try:
-        #         stats = compute_channel_stats(str(log_path))
-        #     except Exception as e:
-        #         print(f"[warn] compute_channel_stats failed for {root}: {e}")
-        #         stats = {"seq_hist": {}}
-        # else:
-        #     print(f"[warn] No output.log in {root}")
-        #     stats = {"seq_hist": {}}
-        # stats_list.append(stats)
-
-        # Reward total
-        ro_path = _find_rollout(root)
-        total_reward = []
-        tput = []
-        outage = []
-        beliefs = []
-        if ro_path:
-            try:
-                with ro_path.open("r", encoding="utf-8", errors="ignore") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                        except Exception:
-                            continue
-                        total_reward.append(compute_reward(rec, reward_cfg, agg=args.agg))
-                        tput.append(rec['stats']['flow_stat']['6203@128']['throughput'])
-                        outage.append(rec['stats']['flow_stat']['6203@128']['outage_rate'])
-                        beliefs.append(rec['res']['belief'][0])
-            except Exception as e:
-                print(f"[warn] Failed reading rewards in {root}: {e}")
-        else:
-            print(f"[warn] No rollout.jsonl/roolout.jsonl in {root}")
-        reward_totals.append( np.mean(total_reward) )
-        tputs_totals.append(np.mean(tput))
-        outage_totals.append(np.mean(outage))
-        belief_totals.append(np.mean(beliefs))
-
-    # ---- Build channel distributions and plot ----
-    ch0_distributions = build_channel_distributions(stats_list, channel=0)
-
-    # plot_channel_box(
-    #     ch_distributions=ch0_distributions,
-    #     folder_names=folder_names,
-    #     title="Channel 0 per-seq counts (box)",
-    #     out_path=str(out_dir / "channel0_box.png"),
-    #     showfliers=args.showfliers,
-    # )
-    # plot_channel_box(
-    #     ch_distributions=ch1_distributions,
-    #     folder_names=folder_names,
-    #     title="Channel 1 per-seq counts (box)",
-    #     out_path=str(out_dir / "channel1_box.png"),
-    #     showfliers=args.showfliers,
-    # )
+        
+    thr_vals, out_vals, rewards  = summarize_rollouts_for_bars(rollouts, agg="mean")
+    plot_bar_simple(np.array(thr_vals) / 1e6, il_ids, title=None, ylabel="Throughput (Mb/s)", save_path=str(out_dir / "tput.png"))
+    plot_bar_simple(np.array(out_vals) * 100, il_ids, title=None, ylabel="Outage (%)", save_path=str(out_dir / "outage.png"))
+    plot_bar_simple(rewards, il_ids, title=None, ylabel="Reward", save_path=str(out_dir / "reward.png"))
     
-    plot_reward_bar(
-        reward_totals=reward_totals,
-        folder_names=[0,1,2,3],
-        title=f"",
-        out_path=str(out_dir / "reward.png"),
-        ylabel="Average Reward"
-    )
-    
-    plot_reward_bar(
-        reward_totals=tputs_totals,
-        folder_names=[0,1,2,3],
-        title=f"",
-        out_path=str(out_dir / "tput.png"),
-        ylabel="Average Throughput"
-    )
-    
-    plot_reward_bar(
-        reward_totals=outage_totals,
-        folder_names=[0,1,2,3],
-        title=f"",
-        out_path=str(out_dir / "outage.png"),
-        ylabel="Average Outage"
-    )
+    try:
+        plot_interface_percentages_boxplot(seq_interface, il_ids, title="Channel Utilization per rollout", ylabel="Factor", save_path=str(out_dir / "percentage.png"), show_points=False)
+    except:
+        pass
     
 
-    plot_reward_bar(
-        reward_totals=belief_totals,
-        folder_names=[0,1,2,3],
-        title=f"",
-        out_path=str(out_dir / "belief.png"),
-        ylabel="Average Outage"
-    )
-    
-
-    # ---- Console summary ----
-    print("\nSaved plots:")
-    print(f"  {out_dir / 'channel0_box.png'}")
-    print(f"  {out_dir / 'channel1_box.png'}")
-    print(f"  {out_dir / 'reward_bar.png'}")
-    
 
 if __name__ == "__main__":
     main()
