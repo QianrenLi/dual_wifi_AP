@@ -26,6 +26,7 @@ def load_config_file(config_name):
 
 def create_transmission_config(config_name, exp_name, conn: Connector, is_update=False) -> Tuple[TxSrcs, Flows, TxSrcs, Flows]:
     cfg = load_config_file(config_name)
+    macs_need_separate = cfg.macs_need_separate
     clients = Connector().list_all()
     while True:
         try:
@@ -90,7 +91,7 @@ def create_transmission_config(config_name, exp_name, conn: Connector, is_update
             Connector(client).sync_file(tx_folder, is_pull=False)
             Connector(client).sync_file(network_folder, is_pull=False)
             
-    return tx_srcs, flows, inter_src, inter_flow
+    return tx_srcs, flows, inter_src, inter_flow, macs_need_separate
 
 if __name__ == "__main__":
     # conn = Connector()

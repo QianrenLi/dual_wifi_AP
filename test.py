@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List
 from tap import Connector
 from util.exp_setup import create_transmission_config
 from util.flows import flow_to_rtt_log, Flow
+from util.route_operation import SudoIP, seperate_nic, check_table_creation
 
 TxSrcs = Dict[str, Dict[str, str]]        # tx -> {"control_config": "...", "transmission_config": "..."}
 Flows = Dict[int, Flow]                   # port -> Flow
@@ -150,13 +151,13 @@ def move_rollout_from_tx(folder: Path, tx_srcs: TxSrcs, is_evaluate: bool):
             rollout.rename(folder / "rollout.jsonl")
             break
     
-    if is_evaluate:
-        output_log = Path("stream-replay/log/output.log")
-        for tx in tx_srcs.keys():
-            Connector(tx).sync_file("stream-replay/log/output.log")
-            if output_log.exists():
-                output_log.rename(folder / "output.log")
-                break
+    # if is_evaluate:
+    output_log = Path("stream-replay/log/output.log")
+    for tx in tx_srcs.keys():
+        Connector(tx).sync_file("stream-replay/log/output.log")
+        if output_log.exists():
+            output_log.rename(folder / "output.log")
+            break
 
 
 def push_rollout_to_trainer(folder: Path):
@@ -220,29 +221,51 @@ def run_iteration(
     iteration: int,
     traces: List[Path],
     max_traces: int,
+    macs_need_separate,
+    sudoip: SudoIP,
     int_level: int = 0,
-    is_evaluate = False
+    is_evaluate = False,
 ):
     start_t = time.time()
 
-    # 1) start agents
-    start_agents(conn, tx_srcs, eval_mode=args.evaluate)
-
-    # 2) schedule receives & sends
-    schedule_all_receives(conn, tx_flows, inter_flows, duration, render=args.render)
-    run_tx_and_interference(conn, tx_srcs, inter_srcs, duration)
-
-    # 3) run remote work
-    try:
-        res = apply_until_done(conn, pause_s=0.5, timeout_s=duration+30, backoff=1.5, jitter_s=0.2)
-    except KeyboardInterrupt:
-        exit()
-    except:
-        print("fail and retry")
-        return iteration
+    ##[Warning] Should put this part to agent if distributed
+    for sta_name in macs_need_separate:
+        mac_res = check_table_creation(macs_need_separate[sta_name])
+        if not all(mac_res):
+            seperate_nic(sudoip, macs_need_separate[sta_name])
     
-    res = [r for r in res if r]  # drop {}
-    exp_t = time.time()
+    ##
+    while True:
+        # 1) start agents
+        start_agents(conn, tx_srcs, eval_mode=args.evaluate)
+
+        # 2) schedule receives & sends
+        schedule_all_receives(conn, tx_flows, inter_flows, duration, render=args.render)
+        run_tx_and_interference(conn, tx_srcs, inter_srcs, duration)
+
+        # 3) run remote work
+        try:
+            res = apply_until_done(conn, pause_s=0.5, timeout_s=duration+30, backoff=1.5, jitter_s=0.2)
+        except KeyboardInterrupt:
+            exit()
+        except:
+            print("fail and retry")
+            return iteration
+        
+        res = [r for r in res if r]  # drop {}
+        exp_t = time.time()
+        
+        ## Exp check
+        ##[Warning] Should put this part to agent if distributed
+        exp_correct = True
+        for sta_name in macs_need_separate:
+            mac_res = check_table_creation(macs_need_separate[sta_name])
+            if not all(mac_res):
+                seperate_nic(sudoip, macs_need_separate[sta_name])
+                exp_correct = False
+        if exp_correct:
+            break
+        ##
 
     # 4) collect artifacts
     folder = now_trial_folder(exp_name, interference_level=int_level)
@@ -283,6 +306,7 @@ def train_loop(
     paths: List,
     duration: int,
     exp_name: str,
+    sudoip:SudoIP,
 ):
     def path_id(iteration):
         return (iteration // args.per_exp_trials) % len(paths)
@@ -296,25 +320,26 @@ def train_loop(
     interference_level = path_id(iteration)
     path = paths[ interference_level ]
     print(f"Train config {path}")
-    tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
+    tx_srcs, tx_flows, inter_srcs, inter_flows, macs_need_separate = create_transmission_config( path, exp_name, conn, is_update=True)
     
     # if iteration == 0:
         # clean_first_iteration(exp_name)
-
     any_tx = next(iter(tx_srcs))
     control_cfg = tx_srcs[any_tx]["control_config"]
-    # train_forever(conn, control_cfg, f'exp_trace/{exp_name}', None)
+    train_forever(conn, control_cfg, f'exp_trace/{exp_name}', None)
     
     while True:
         if iteration % args.per_exp_trials == 0:
             interference_level = path_id(iteration)
             path = paths[ interference_level ]
             print(f"Train config {path}")
-            tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
+            tx_srcs, tx_flows, inter_srcs, inter_flows, macs_need_separate = create_transmission_config( path, exp_name, conn, is_update=True)
             
         iteration = run_iteration(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
-            duration, exp_name, iteration, traces, max_traces, int_level=interference_level
+            duration, exp_name, iteration, traces, max_traces, int_level=interference_level, 
+            sudoip=sudoip,
+            macs_need_separate = macs_need_separate
         )
 
 
@@ -324,14 +349,17 @@ def evaluate(
     paths: List,
     duration: int,
     exp_name: str,
+    sudoip: SudoIP
 ):
     # single evaluation pass reusing the same building blocks
     for int_level, path in enumerate(paths): 
         print(f"Evaluate config {path}")
-        tx_srcs, tx_flows, inter_srcs, inter_flows = create_transmission_config( path, exp_name, conn, is_update=True)
+        tx_srcs, tx_flows, inter_srcs, inter_flows, macs_need_separate = create_transmission_config( path, exp_name, conn, is_update=True)
         _ = run_iteration(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
-            duration, exp_name, iteration=0, traces=[], max_traces=1, int_level=int_level, is_evaluate=True
+            duration, exp_name, iteration=0, traces=[], max_traces=1, int_level=int_level, is_evaluate=True,
+            macs_need_separate = macs_need_separate,
+            sudoip = sudoip,
             )
 
 
@@ -347,6 +375,10 @@ def main():
 
     conn = Connector()
     
+    import getpass
+    password = getpass.getpass("sudo password: ")  # avoids showing it on screen
+    sudoip = SudoIP(password)
+    
     if args.exp_folder != "":
         folder = Path(f'{args.exp_folder}')
         paths = sorted(folder.rglob("*.py"), key=lambda p: int(p.stem) )
@@ -354,9 +386,9 @@ def main():
         paths = [ Path("config") / f'{args.exp_name}.py' ]
     
     if args.evaluate:
-        evaluate(args, conn, paths, args.duration, args.exp_name)
+        evaluate(args, conn, paths, args.duration, args.exp_name, sudoip)
     else:
-        train_loop(args, conn, paths, args.duration, args.exp_name)
+        train_loop(args, conn, paths, args.duration, args.exp_name, sudoip)
 
 
 if __name__ == "__main__":
