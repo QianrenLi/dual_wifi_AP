@@ -96,7 +96,7 @@ class RNNPriReplayFast:
                  gamma: float = 0.99,
                  alpha: float = 0.7,     # rank-prioritization exponent
                  beta0: float = 0.4,     # IS exponent (you can anneal toward 1.0)
-                 rebalance_interval: int = 10000,  # infrequent sort+rebuild
+                 rebalance_interval: int = 2000,  # infrequent sort+rebuild
                  writer=None):
         self.device = device
         self.capacity = int(capacity)
@@ -203,7 +203,7 @@ class RNNPriReplayFast:
         buf = RNNPriReplayFast(
             device=device, capacity=capacity, gamma=kwargs.get("gamma", 0.99),
             alpha=kwargs.get("alpha", 0.7), beta0=kwargs.get("beta0", 0.4),
-            rebalance_interval=kwargs.get("rebalance_interval", 100000),
+            rebalance_interval=kwargs.get("rebalance_interval", 2000),
             writer=kwargs.get("writer", None)
         )
         interfs = kwargs.get("interference_vals", [0]*len(traces))

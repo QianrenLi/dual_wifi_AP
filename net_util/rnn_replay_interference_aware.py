@@ -179,7 +179,7 @@ class RNNPriReplayInterferenceAware:
                  gamma: float = 0.99,
                  alpha: float = 0.7,
                  beta0: float = 0.4,
-                 rebalance_interval: int = 10000,
+                 rebalance_interval: int = 2000,
                  writer=None):
         self.device = device
         self.capacity = int(capacity)
