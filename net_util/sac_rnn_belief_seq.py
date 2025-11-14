@@ -240,17 +240,17 @@ class SACRNNBeliefSeq(PolicyBase):
         
         stats = {
             "cdl/penalty_total": penalty.detach(),
-            "cdl/cql1": cql1.detach(),
-            "cdl/cql2": cql2.detach(),
-            "cdl/minQ_bc_mean":   min_q_bc.detach(),
-            "cdl/minQ_rand_mean": min_q_rand.detach(),
-            "cdl/minQ_curr_mean": min_q_curr.detach(),
-            "cdl/minQ_next_mean": min_q_next.detach(),
+            # "cdl/cql1": cql1.detach(),
+            # "cdl/cql2": cql2.detach(),
+            # "cdl/minQ_bc_mean":   min_q_bc.detach(),
+            # "cdl/minQ_rand_mean": min_q_rand.detach(),
+            # "cdl/minQ_curr_mean": min_q_curr.detach(),
+            # "cdl/minQ_next_mean": min_q_next.detach(),
             "cdl/gap_rand_bc": (min_q_rand - min_q_bc).detach(),
             "cdl/gap_curr_bc": (min_q_curr - min_q_bc).detach(),
-            "cdl/gap_next_bc": (min_q_next - min_q_bc).detach(),
-            "cdl/std_cat_q1": cat_q1.squeeze(-1).std(dim=2).mean().detach(),
-            "cdl/std_cat_q2": cat_q2.squeeze(-1).std(dim=2).mean().detach(),
+            # "cdl/gap_next_bc": (min_q_next - min_q_bc).detach(),
+            # "cdl/std_cat_q1": cat_q1.squeeze(-1).std(dim=2).mean().detach(),
+            # "cdl/std_cat_q2": cat_q2.squeeze(-1).std(dim=2).mean().detach(),
         }
         
         return penalty, stats
@@ -269,6 +269,9 @@ class SACRNNBeliefSeq(PolicyBase):
 
         actor_losses, critic_losses, ent_losses = [], [], []
         q1_means, q2_means, qmin_pi_means, logp_means = [], [], [], []
+
+        if not is_batch_rl and (self._upd * 50) // self.buf.data_num >= 50:
+            return False
 
         # One pass per sequence batch
         got_any = False
@@ -299,7 +302,6 @@ class SACRNNBeliefSeq(PolicyBase):
             kl_loss  = (0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0)).mean()
             beta     = self.annealing_bl(epoch, 100)
             b_loss   = mse_loss + beta * kl_loss
-            b_loss = mse_loss
             belief_seq_TB1_sac = z_TB1.detach()            # safe for RL path
 
             ## Make belief correct
@@ -325,7 +327,6 @@ class SACRNNBeliefSeq(PolicyBase):
                 c_loss = (c_loss_batch * importance_weights ).mean()
                 
                 if is_batch_rl:
-                    critic_td_only = c_loss.detach()
                     cdl_penalty, cdl_stats = self.cdl_loss(
                         feat_TBH        = feat_TBH,
                         nxt_TBD         = nxt_TBD,
@@ -335,6 +336,19 @@ class SACRNNBeliefSeq(PolicyBase):
                         beta_cql        = 5 * 20 / self.buf.sigma,
                     )
                     c_loss = c_loss + cdl_penalty
+                    
+                    # interference_levels = interf_B1.squeeze(-1).long()  # [B], already integers 0-4
+                    
+                    # Group critic losses by interference level
+                    # unique_levels = interference_levels.unique()
+                    # c_loss_batch_detach = c_loss_batch.detach()
+                    # for level in unique_levels:
+                    #     level_mask = (interference_levels == level)
+                    #     if level_mask.any():
+                    #         # Average critic loss for this interference level
+                    #         level_critic_loss = c_loss_batch[level_mask].mean()
+                    #         writer.add_scalar(f"loss/critic_interf_{level}", level_critic_loss.item(), self._upd)
+                            
                 
             # ---- Optimize (same order is fine now; graphs disjoint) ----
             self.critic_opt.zero_grad(set_to_none=True)
@@ -380,8 +394,6 @@ class SACRNNBeliefSeq(PolicyBase):
             if is_batch_rl:
                 for k, v in cdl_stats.items():
                     writer.add_scalar(k, v.item(), self._upd)
-                writer.add_scalar("loss/critic_td_only", critic_td_only.item(), self._upd)
-                writer.add_scalar("loss/critic_total",   c_loss.detach().item(), self._upd)
                 
             # aggregates
             actor_losses.append(a_loss.item())
@@ -403,9 +415,6 @@ class SACRNNBeliefSeq(PolicyBase):
         # reset carried states for next epoch if you prefer
         self._belief_h = None
         self._belief = None
-        
-        if not is_batch_rl and self._upd // self.buf.data_num >= 4:
-            return False
 
         # epoch-end aggregates
         writer.add_scalar("loss/actor_epoch",  _safe_mean(actor_losses), epoch)
