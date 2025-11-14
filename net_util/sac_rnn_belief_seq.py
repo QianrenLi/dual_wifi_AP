@@ -420,6 +420,7 @@ class SACRNNBeliefSeq(PolicyBase):
         writer.add_scalar("loss/actor_epoch",  _safe_mean(actor_losses), epoch)
         writer.add_scalar("loss/critic_epoch", _safe_mean(critic_losses), epoch)
         writer.add_scalar("loss/b_loss", b_loss.item(), epoch)
+        writer.add_scalar("loss/KL_loss", kl_loss.item(), epoch)
         writer.add_scalar("policy/logp_pi_epoch", _safe_mean(logp_means), epoch)
         writer.add_scalar("q/q1_mean_epoch", _safe_mean(q1_means), epoch)
         writer.add_scalar("q/q2_mean_epoch", _safe_mean(q2_means), epoch)

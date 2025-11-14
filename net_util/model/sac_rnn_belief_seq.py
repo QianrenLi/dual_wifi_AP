@@ -12,7 +12,7 @@ class FeatureExtractorGRU(nn.Module):
         self.hidden = hidden
         self.mlp  = nn.Sequential(nn.Linear(obs_dim, hidden), nn.LayerNorm(hidden), nn.GELU())
         self.gru  = nn.GRU(input_size=hidden, hidden_size=hidden, num_layers=1, batch_first=False)
-        self.post = nn.Sequential(nn.LayerNorm(hidden), nn.GELU())
+        self.post = nn.Identity()
 
     def init_state(self, bsz: int, device=None):
         # shape [num_layers, B, H] = [1, B, H]
@@ -121,10 +121,6 @@ class Network(nn.Module):
     def encode(self, obs_BD: th.Tensor, belief_B1: th.Tensor, h0: th.Tensor):
         x = th.cat([obs_BD, belief_B1], dim=-1)
         return self.fe.forward_step(x, h0)
-
-    def encode_target(self, obs_BD: th.Tensor, belief_B1: th.Tensor, h0: th.Tensor):
-        x = th.cat([obs_BD, belief_B1], dim=-1)
-        return self.fe_t.forward_step(x, h0)
 
     # sequence encoders
     def encode_seq(self, obs_TBD: th.Tensor, belief_TB1: th.Tensor, h0: th.Tensor):
