@@ -301,13 +301,11 @@ def create_obs(
     state: List,
     action_dim: int,
     action: List | None,
-    reward: List,
 ):
     if action is not None:
         state.extend(action)
     else:
         state.extend([0.0] * action_dim)
-    state.extend(reward)
     return state
     
     
@@ -335,8 +333,7 @@ def create_obss(
     out: List[List] = []
     for t in range(T):
         action = actions[t-1] if t > 0 else None
-        reward = rewards[t]
-        out.append(create_obs(states[t], action_dim, action, reward))
+        out.append(create_obs(states[t], action_dim, action))
 
     return out
 
@@ -364,16 +361,21 @@ def trace_collec(
 
 # ============================== Demo ============================= #
 if __name__ == "__main__":
-    STATE_DESCRIPTOR: Descriptor = {
-        # agent-level features (choose deterministic IP under device_stat.link)
+    STATE_DESCRIPTOR = {
         "signal_dbm": { "rule": True, "name": "signal_dbm", "pos": "agent" },
         "tx_mbit_s":  { "rule": True, "name": "tx_mbit_s",  "pos": "agent" },
 
         "queues":     { "rule": "queues_only_ac1", "from": "queues", "pos": "agent" },
-        "bitrate":     { "rule": "stat_bitrate", "from": "bitrate", "args": {"alpha": 1e-6}, "pos": "flow" },
         
         "app_buff":    { "rule": True, "from": "app_buff", "pos": "flow" },
         "frame_count": { "rule": True, "from": "frame_count", "pos": "flow" },
+        
+        "bitrate": {
+            "rule": True,
+            "from": "bitrate",
+            "pos": "flow"
+        },
+        "outage_rate": { "rule": True, "from": "outage_rate", "pos": "flow" }
     }
     
     REWARD_DESCRIPTOR = {
@@ -391,8 +393,11 @@ if __name__ == "__main__":
         }
     }
     
-    s, a, r, n = trace_collec( '/home/qianren/workspace/dual_wifi_AP/exp_trace/rnn_2000_p3_5/IL_0_trial_20251109-135311/rollout.jsonl' ,state_descriptor=STATE_DESCRIPTOR, reward_descriptor=REWARD_DESCRIPTOR)
-    print(a[0])
+    s, a, r, n = trace_collec( '/home/qianren/workspace/dual_wifi_AP/exp_trace/rnn_1500_day/IL_0_trial_20251114-103432/rollout.jsonl' ,state_descriptor=STATE_DESCRIPTOR, reward_descriptor=REWARD_DESCRIPTOR)
+    print(s[0])
+    print(len(s[0]))
+    
+    # python compute_normalization.py --control_config net_util/net_config/rnn_1500_day/test.json --trace_path exp_trace/rnn_1500_day
     
     #################
     # example_js_str = '''

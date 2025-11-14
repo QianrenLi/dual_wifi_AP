@@ -185,9 +185,10 @@ class TraceWatcher:
                 reward_descriptor=self.control_config.get("reward_cfg", None),
             )
             s_nor = []
-            for _s in s:
-                s_nor.append(self._state_tf.apply_to_list(_s))
-            s = s_nor
+            if self._state_tf:
+                for _s in s:
+                    s_nor.append(self._state_tf.apply_to_list(_s))
+                s = s_nor
             merged.append((s, a, r, net))
         return merged, interference_vals
 

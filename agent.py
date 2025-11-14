@@ -197,8 +197,7 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
             current_stats = {'stats': stats}
             
             states = flatten_leaves(trace_filter( current_stats, control_config['state_cfg'] ))
-            last_rewards = flatten_leaves(trace_filter( current_stats, control_config['reward_cfg'] ))
-            obs_for_policy = create_obs(states, 0, last_action, last_rewards)
+            obs_for_policy = create_obs(states, 0, last_action)
             
             # 2) Base action + stochastic exploration
             try:
