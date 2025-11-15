@@ -23,7 +23,7 @@ def symlog(x: th.Tensor, eps=1e-12) -> th.Tensor:
 
 @register_policy_cfg
 @dataclass
-class SACRNNBeliefSeq_Config:
+class SACRNNBeliefSeqDroq_Config:
     # core
     batch_size: int = 256
     learning_starts: int = 2_000
@@ -52,9 +52,9 @@ class SACRNNBeliefSeq_Config:
     retrain_reset_targets: bool = True        # reinit target nets from freshly reset critics
 
 @register_policy
-class SACRNNBeliefSeq(PolicyBase):
+class SACRNNBeliefSeqDroq(PolicyBase):
     """Replay buffer must yield (obs, act, rew, next_obs, done) minibatches."""
-    def __init__(self, cmd_cls, cfg: SACRNNBeliefSeq_Config, rollout_buffer: RNNPriReplayBuffer2 | None = None, device: str | None = None, state_transform_dict = None):
+    def __init__(self, cmd_cls, cfg: SACRNNBeliefSeqDroq_Config, rollout_buffer: RNNPriReplayBuffer2 | None = None, device: str | None = None, state_transform_dict = None):
         super().__init__(cmd_cls, state_transform_dict = state_transform_dict)
         th.manual_seed(cfg.seed); np.random.seed(cfg.seed)
         self.cfg = cfg
