@@ -60,13 +60,13 @@ class Network(nn.Module):
         def _make_q():
             return nn.Sequential(
                 nn.Linear(hidden + act_dim, hidden),
-                nn.Dropout(0.2),
+                nn.Dropout(0.05),
                 nn.LayerNorm(hidden),
                 nn.GELU(),
                 
                 nn.Linear(hidden, hidden),      
                   
-                nn.Dropout(0.2),
+                nn.Dropout(0.05),
                 nn.LayerNorm(hidden),
                 nn.GELU(),
                 
@@ -87,6 +87,16 @@ class Network(nn.Module):
         for t, s in zip(self.q1_t.parameters(), self.q1.parameters()): t.data.copy_(s.data)
         for t, s in zip(self.q2_t.parameters(), self.q2.parameters()): t.data.copy_(s.data)
         for t, s in zip(self.fe_t.parameters(), self.fe.parameters()): t.data.copy_(s.data)
+        
+    def _soft_sync(self, tau):
+        with th.no_grad():
+            for tp, sp in zip(self.q1_t.parameters(), self.q1.parameters()):
+                tp.mul_(1 - tau).add_(sp, alpha=tau)
+            for tp, sp in zip(self.q2_t.parameters(), self.q2.parameters()):
+                tp.mul_(1 - tau).add_(sp, alpha=tau)
+            for tp, sp in zip(self.fe_t.parameters(), self.fe.parameters()):
+                tp.mul_(1 - tau).add_(sp, alpha=tau)
+
 
     @staticmethod
     def _tanh_log_det(u: th.Tensor) -> th.Tensor:

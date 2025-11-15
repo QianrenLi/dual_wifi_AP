@@ -99,6 +99,8 @@ class SACRNNBeliefSeqDroq(PolicyBase):
         
         self.retrain_idx = 0
         self.max_retrain = 5
+        
+        self.critic_update_steps = 20
 
     def _alpha(self):
         return (self.log_alpha.exp() if self.log_alpha is not None else self.alpha_tensor).detach()
@@ -128,55 +130,6 @@ class SACRNNBeliefSeqDroq(PolicyBase):
         for tp, sp in zip(tgt.parameters(), src.parameters()):
             tp.data.copy_(sp.data)
 
-    def _reinit_actor_critic_(self, writer: Optional[SummaryWriter], epoch: int):
-        """
-        Reinitialize actor & critic stacks (fe/q1/q2 + actor), keep belief unchanged.
-        Optionally reset α and re-init target nets.
-        """
-        # 1) Reinitialize all non-belief submodules
-        self._reset_modules_excluding_belief_()
-
-        # 2) Reinitialize target networks from the (now fresh) critics/encoder
-        if self.cfg.retrain_reset_targets:
-            with th.no_grad():
-                self._hard_copy_(self.net.q1_t, self.net.q1)
-                self._hard_copy_(self.net.q2_t, self.net.q2)
-                # If you keep a target FE, refresh it too
-                if hasattr(self.net, "fe_t") and hasattr(self.net, "fe"):
-                    self._hard_copy_(self.net.fe_t, self.net.fe)
-
-        # 3) Reset actor & critic optimizers (fresh states)
-        ac_lr = self.cfg.lr * 0.1 if self.cfg.batch_rl else self.cfg.lr
-        self.actor_opt  = th.optim.Adam(self.net.actor_parameters(),  lr=ac_lr)
-        self.critic_opt = th.optim.Adam(self.net.critic_parameters(), lr=self.cfg.lr)
-
-        # 4) Keep belief optimizer/state as-is (explicitly requested)
-        #    (If you ever want to reset its state, do it here.)
-
-        # 5) Reset α if configured
-        if self.cfg.retrain_reset_alpha:
-            if self.cfg.ent_coef == "auto" and self.cfg.batch_rl == False:
-                self.log_alpha = th.tensor([self.cfg.ent_coef_init], device=self.device).log().requires_grad_(True)
-                self.alpha_opt = th.optim.Adam([self.log_alpha], lr=self.cfg.lr)
-                self.target_entropy = -float(self.cfg.act_dim) if self.cfg.target_entropy == "auto" else float(self.cfg.target_entropy)
-            else:
-                self.log_alpha, self.alpha_opt = None, None
-                self.alpha_tensor = th.tensor(float(0.2), device=self.device)
-
-        # 6) Clear some carried states (safe choice for a fresh start of actor/critic)
-        self._epoch_h = None
-        self._eval_h = None
-        # Keep belief hidden unless you also want to hard reset it:
-        # self._belief_h = None
-
-        if writer is not None:
-            writer.add_text("retrain/event", f"Actor/Critic reinitialized at epoch {epoch}", epoch)
-
-    def _maybe_retrain_(self, epoch: int, writer: Optional[SummaryWriter]):
-        itv = getattr(self.cfg, "retrain_interval", 0) or 0
-        if itv > 0 and epoch > 0 and (epoch % itv) == 0 and self.retrain_idx < self.max_retrain:
-            self._reinit_actor_critic_(writer, epoch)
-            self.retrain_idx += 1
 
     def cdl_loss(
         self,
@@ -256,170 +209,138 @@ class SACRNNBeliefSeqDroq(PolicyBase):
         return penalty, stats
 
 
-    def train_per_epoch(self, epoch: int, writer: Optional[SummaryWriter] = None, log_dir: str = "runs/sac_rnn", is_batch_rl = False) -> bool:
-        th.backends.cudnn.benchmark = True
-        use_cuda_amp = False
-        scaler = th.amp.GradScaler('cuda', enabled=use_cuda_amp)
+    # --- small utilities (inside the class) ---------------------------------
+    def _predict_belief_seq(self, obs_TBD: th.Tensor):
+        B = obs_TBD.size(1)
+        belief_h0 = self.net.belief_rnn.init_state(B, device=self.device)
+        z_TB1, bT, mu_TB1, logvar_TB1, y_hat_TB1 = self.net.belief_predict_seq(obs_TBD, belief_h0)
+        return z_TB1, mu_TB1, logvar_TB1, y_hat_TB1
 
+    def _encode_with_belief(self, obs_TBD: th.Tensor, belief_TB1: th.Tensor, h0: th.Tensor):
+        return self.net.encode_seq(obs_TBD, belief_TB1.detach(), h0)
+
+    def _belief_supervision_loss(self, mu_TB1, logvar_TB1, y_hat_TB1, interf_B1, iw_B1, epoch: int):
+        y_last_B1    = y_hat_TB1[-1]
+        mu_last_BH   = mu_TB1[-1]
+        logv_last_BH = logvar_TB1[-1]
+        mse_loss = (F.smooth_l1_loss(y_last_B1, interf_B1, reduction='none') * iw_B1).mean()
+        kl_loss  = (0.5 * (mu_last_BH.pow(2) + logv_last_BH.exp() - logv_last_BH - 1.0)).mean()
+        beta     = self.annealing_bl(epoch, 1)
+        return mse_loss + beta * kl_loss, beta, kl_loss
+
+    def _critic_loss(self, feat_TBH, act_TBA, nxt_TBD, belief_TB1, hT, rew_TB1, done_TB1, importance_weights, is_batch_rl: bool):
+        alpha = self._alpha()
+        with th.no_grad():
+            backup_TB1 = self.net.target_backup_seq(nxt_TBD, belief_TB1, hT, rew_TB1, done_TB1, self.cfg.gamma, alpha)
+
+        q1_TB1, q2_TB1 = self.net.q(feat_TBH, act_TBA)
+        diff = th.stack([q1_TB1, q2_TB1], dim=0) - backup_TB1
+        diff = diff / self.buf.sigma
+        c_loss_per_t = diff.pow(2).mean(dim=0)      # [T,B,1]
+        c_loss_batch = c_loss_per_t.mean(dim=(0,2)) # [B]
+        c_loss = (c_loss_batch * importance_weights).mean()
+
+        cdl_stats = None
+        if is_batch_rl:
+            cdl_penalty, cdl_stats = self.cdl_loss(
+                feat_TBH=feat_TBH, nxt_TBD=nxt_TBD, belief_seq_TB1_sac=belief_TB1,
+                act_TBA=act_TBA, num_random=10, beta_cql=5 * 20 / self.buf.sigma,
+            )
+            c_loss = c_loss + cdl_penalty
+        return c_loss, cdl_stats
+
+    def _actor_loss(self, feat_TBH):
+        with self.net.critics_frozen():
+            a_pi_TBA, logp_TB1 = self.net.sample_from_features(feat_TBH)
+            q1_pi, q2_pi = self.net.q(feat_TBH.detach(), a_pi_TBA)
+            alpha = self._alpha()
+            a_loss = (alpha * logp_TB1 - (q1_pi + q2_pi) / 2).mean()
+            return a_loss, logp_TB1
+
+    def _entropy_loss(self, logp_TB1):
+        if self.alpha_opt is None:
+            return th.zeros((), device=self.device)
+        return -(self.log_alpha * (logp_TB1.detach() + self.target_entropy)).mean()
+
+    def _step_with_clip(self, params_iterable, opt: th.optim.Optimizer, loss: th.Tensor, clip_norm: float):
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        th.nn.utils.clip_grad_norm_(params_iterable, clip_norm)
+        opt.step()
+
+
+    def train_per_epoch(self, epoch: int, writer: Optional[SummaryWriter] = None, log_dir: str = "runs/sac_rnn", is_batch_rl: bool = False) -> bool:
+        th.backends.cudnn.benchmark = True
         local_writer = False
         if writer is None:
             writer = SummaryWriter(log_dir=log_dir); local_writer = True
-            
-        self._maybe_retrain_(epoch, writer)
 
-        actor_losses, critic_losses, ent_losses = [], [], []
-        q1_means, q2_means, qmin_pi_means, logp_means = [], [], [], []
-
-        if not is_batch_rl and (self._upd * 50) // self.buf.data_num >= 50:
+        # (optional) early return gate
+        if not is_batch_rl and (self._upd * 50) // self.buf.data_num >= 50 and self.buf.data_num >= 10000:
             return False
 
-        # One pass per sequence batch
-        got_any = False
-        for batch in self.buf.get_sequences(self.cfg.batch_size, trace_length=100, device=self.device):
-            got_any = True
-            obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch  # time-major
+        # ---------- Critic + Belief phase ----------
+        for _ in range(self.critic_update_steps):
+            for batch in self.buf.get_sequences(self.cfg.batch_size, trace_length=100, device=self.device):
+                obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch
+                T, B, _ = obs_TBD.shape
+                importance_weights = info['is_weights'].detach().squeeze(-1)
+
+                h0, _ = self.net.init_hidden(B, self.device)
+                z_TB1, mu_TB1, logvar_TB1, y_hat_TB1 = self._predict_belief_seq(obs_TBD)
+                b_loss, beta, kl_loss = self._belief_supervision_loss(
+                    mu_TB1, logvar_TB1, y_hat_TB1,
+                    interf_B1=info["interference"], iw_B1=info["is_weights"].detach(),
+                    epoch=epoch
+                )
+
+                feat_TBH, hT = self._encode_with_belief(obs_TBD, z_TB1, h0)
+                c_loss, cdl_stats = self._critic_loss(
+                    feat_TBH, act_TBA, nxt_TBD, z_TB1, hT, rew_TB1, done_TB1,
+                    importance_weights, is_batch_rl
+                )
+
+                # optimize
+                self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=10.0)
+                self._step_with_clip(self.net.belief_parameteres(), self.belief_opt, b_loss, clip_norm=5.0)
+
+                # targets
+                self.net._soft_sync(self.cfg.tau)
+                self._upd += 1
+                self._global_step += 1
+
+                if cdl_stats is not None:
+                    for k, v in cdl_stats.items():
+                        writer.add_scalar(k, v.item(), self._global_step)
+                
+                writer.add_scalar("loss/critic", c_loss.item(), self._global_step)
+                writer.add_scalar("loss/belief", b_loss.item(), self._global_step)
+                writer.add_scalar("loss/KL", (beta * kl_loss).item(), self._global_step)
+
+
+        # ---------- Actor (+ temperature) phase ----------
+        for batch in self._iter_batches(self.cfg.batch_size, trace_len=100, device=self.device):
+            obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch
             T, B, _ = obs_TBD.shape
-            importance_weights = info['is_weights'].detach().squeeze(-1)
-            # Init hiddens for this batch
-            h0, b0 = self.net.init_hidden(B, self.device)
-            if self._belief_h is None or self._belief_h.shape[1] != B:
-                self._belief_h = b0.clone()
 
-            # ---- Belief sequence (TRAIN) ----
-            B = obs_TBD.size(1)
-            belief_h0 = self.net.belief_rnn.init_state(B, device=self.device)  # <-- always fresh zeros
-            z_TB1, bT, mu_TB1, logvar_TB1, y_hat_TB1 = self.net.belief_predict_seq(obs_TBD, belief_h0)
+            h0, _ = self.net.init_hidden(B, self.device)
+            z_TB1, mu_TB1, logvar_TB1, y_hat_TB1 = self._predict_belief_seq(obs_TBD)
+            feat_TBH, hT = self._encode_with_belief(obs_TBD, z_TB1, h0)
 
-            # Supervise only the last step of the window
-            interf_B1 = info["interference"]               # [B,1], episode-level label
-            iw_B1     = info["is_weights"].detach()        # [B,1]
-
-            y_last_B1   = y_hat_TB1[-1]                    # [B,1]
-            mu_last_BH  = mu_TB1[-1]                       # [B,H]
-            logv_last_BH= logvar_TB1[-1]                   # [B,H]
-
-            mse_loss = (F.smooth_l1_loss(y_last_B1, interf_B1, reduction='none')  * iw_B1).mean()
-            kl_loss  = (0.5 * (mu_last_BH.pow(2) + logv_last_BH.exp() - logv_last_BH - 1.0)).mean()
-            beta     = self.annealing_bl(epoch, 1)
-            b_loss   = mse_loss + beta * kl_loss
-            belief_seq_TB1_sac = z_TB1.detach()            # safe for RL path
-
-            ## Make belief correct
-            # ---- Encode whole sequence (online) ----
-            with th.autocast(device_type='cuda', enabled=use_cuda_amp):
-                feat_TBH, hT = self.net.encode_seq(obs_TBD, belief_seq_TB1_sac, h0)  # use detached belief
-                a_pi_TBA, logp_TB1 = self.net.sample_from_features(feat_TBH)
-                if self.alpha_opt is not None:
-                    ent_loss = -(self.log_alpha * (logp_TB1.detach() + self.target_entropy)).mean()
-                else:
-                    ent_loss = th.zeros((), device=self.device)
-                alpha = self._alpha()
-
-                with th.no_grad():
-                    backup_TB1 = self.net.target_backup_seq(
-                        nxt_TBD, belief_seq_TB1_sac, hT, rew_TB1, done_TB1, self.cfg.gamma, alpha
-                    )
-                q1_TB1, q2_TB1 = self.net.q(feat_TBH, act_TBA)  
-                diff = th.stack([q1_TB1, q2_TB1], dim=0) - backup_TB1
-                diff = diff / self.buf.sigma
-                c_loss_per_t = diff.pow(2).mean(dim=0)          # [T,B,1]
-                c_loss_batch = c_loss_per_t.mean(dim=(0,2))     # [B]
-                c_loss = (c_loss_batch * importance_weights ).mean()
-                
-                if is_batch_rl:
-                    cdl_penalty, cdl_stats = self.cdl_loss(
-                        feat_TBH        = feat_TBH,
-                        nxt_TBD         = nxt_TBD,
-                        belief_seq_TB1_sac = belief_seq_TB1_sac,
-                        act_TBA         = act_TBA,
-                        num_random      = 10,
-                        beta_cql        = 5 * 20 / self.buf.sigma,
-                    )
-                    c_loss = c_loss + cdl_penalty
-                
-            # ---- Optimize (same order is fine now; graphs disjoint) ----
-            self.critic_opt.zero_grad(set_to_none=True)
-            scaler.scale(c_loss).backward()
-            critic_gn = th.nn.utils.clip_grad_norm_(self.net.critic_parameters(), 10.0)
-            scaler.step(self.critic_opt)
-
-            self.actor_opt.zero_grad(set_to_none=True)
-            with self.net.critics_frozen():
-                with th.autocast(device_type='cuda', enabled=use_cuda_amp):
-                    q1_pi, q2_pi = self.net.q(feat_TBH.detach(), a_pi_TBA)
-                    qmin_pi = th.min(q1_pi, q2_pi)
-                    a_loss = (alpha * logp_TB1 - qmin_pi).mean()
-                    
-            scaler.scale(a_loss).backward()
-            actor_gn = th.nn.utils.clip_grad_norm_(self.net.actor_parameters(), 5.0)
-            scaler.step(self.actor_opt)
+            a_loss, logp_TB1 = self._actor_loss(feat_TBH)
+            self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=5.0)
 
             if self.alpha_opt is not None:
-                self.alpha_opt.zero_grad(set_to_none=True)
-                scaler.scale(ent_loss).backward()
-                scaler.step(self.alpha_opt)
+                ent_loss = self._entropy_loss(logp_TB1)
+                self._step_with_clip([self.log_alpha], self.alpha_opt, ent_loss, clip_norm=1e9)  # no real grad clipping needed
 
-            self.belief_opt.zero_grad(set_to_none=True)
-            scaler.scale(b_loss).backward()
-            b_gn = th.nn.utils.clip_grad_norm_(self.net.belief_parameteres(), 5.0)
-            scaler.step(self.belief_opt)
-
-            scaler.update()
-
-            # Soft updates
-            if (self._upd % self.cfg.target_update_interval) == 0:
-                tau = self.cfg.tau
-                with th.no_grad():
-                    for tp, sp in zip(self.net.q1_t.parameters(), self.net.q1.parameters()):
-                        tp.mul_(1 - tau).add_(sp, alpha=tau)
-                    for tp, sp in zip(self.net.q2_t.parameters(), self.net.q2.parameters()):
-                        tp.mul_(1 - tau).add_(sp, alpha=tau)
-                    for tp, sp in zip(self.net.fe_t.parameters(), self.net.fe.parameters()):
-                        tp.mul_(1 - tau).add_(sp, alpha=tau)
-            self._upd += 1
-            
-            if is_batch_rl:
-                for k, v in cdl_stats.items():
-                    writer.add_scalar(k, v.item(), self._upd)
-                
-            # aggregates
-            actor_losses.append(a_loss.item())
-            critic_losses.append(c_loss.item())
-            q1_means.append(q1_TB1.mean().item())
-            q2_means.append(q2_TB1.mean().item())
-            qmin_pi_means.append(qmin_pi.mean().item())
-            logp_means.append(logp_TB1.mean().item())
-            if self.alpha_opt is not None: ent_losses.append(ent_loss.item())
-
-            ## update priorities using per-episode loss
-            self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.detach().cpu().numpy())
-
-            self._global_step += 1
-
-        if not got_any:
-            return False
-
-        # reset carried states for next epoch if you prefer
-        self._belief_h = None
-        self._belief = None
-
-        # epoch-end aggregates
-        writer.add_scalar("loss/actor_epoch",  _safe_mean(actor_losses), epoch)
-        writer.add_scalar("loss/critic_epoch", _safe_mean(critic_losses), epoch)
-        writer.add_scalar("loss/b_loss", b_loss.item(), epoch)
-        writer.add_scalar("loss/KL_loss", beta * kl_loss.item(), epoch)
-        writer.add_scalar("policy/logp_pi_epoch", _safe_mean(logp_means), epoch)
-        writer.add_scalar("q/q1_mean_epoch", _safe_mean(q1_means), epoch)
-        writer.add_scalar("q/q2_mean_epoch", _safe_mean(q2_means), epoch)
-        writer.add_scalar("q/qmin_pi_epoch", _safe_mean(qmin_pi_means), epoch)
-        if ent_losses: 
-            entropy_ep = _safe_mean(ent_losses)
-            writer.add_scalar("loss/entropy_epoch", entropy_ep, epoch)
+        # ---------- Epoch-end logging (kept minimal/clean) ----------
+        writer.add_scalar("loss/actor_loss", a_loss.item(), epoch)
 
         if local_writer:
             writer.flush(); writer.close()
-            
         return True
+
 
     @th.no_grad()
     def tf_act(self, obs_vec: list[float], is_evaluate: bool = False, reset_hidden: bool = False):
@@ -479,6 +400,7 @@ class SACRNNBeliefSeqDroq(PolicyBase):
 
     def load(self, path: str, device: str):
         """Load the model and optimizer states."""
+        device = th.device(device)
         checkpoint = th.load(path, map_location=device, weights_only=False)
         self.net.load_state_dict(checkpoint['model_state_dict'])
         self.actor_opt.load_state_dict(checkpoint['actor_opt_state_dict'])
