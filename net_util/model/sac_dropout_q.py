@@ -60,13 +60,12 @@ class Network(nn.Module):
         def _make_q():
             return nn.Sequential(
                 nn.Linear(hidden + act_dim, hidden),
-                nn.Dropout(0.05),
+                nn.Dropout(0.2),
                 nn.LayerNorm(hidden),
                 nn.GELU(),
                 
-                nn.Linear(hidden, hidden),      
-                  
-                nn.Dropout(0.05),
+                nn.Linear(hidden, hidden),
+                nn.Dropout(0.2),
                 nn.LayerNorm(hidden),
                 nn.GELU(),
                 

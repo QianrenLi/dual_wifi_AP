@@ -100,7 +100,7 @@ class SACRNNBeliefSeqDroq(PolicyBase):
         self.retrain_idx = 0
         self.max_retrain = 5
         
-        self.critic_update_steps = 20
+        self.critic_update_steps = 10
 
     def _alpha(self):
         return (self.log_alpha.exp() if self.log_alpha is not None else self.alpha_tensor).detach()
@@ -225,7 +225,7 @@ class SACRNNBeliefSeqDroq(PolicyBase):
         logv_last_BH = logvar_TB1[-1]
         mse_loss = (F.smooth_l1_loss(y_last_B1, interf_B1, reduction='none') * iw_B1).mean()
         kl_loss  = (0.5 * (mu_last_BH.pow(2) + logv_last_BH.exp() - logv_last_BH - 1.0)).mean()
-        beta     = self.annealing_bl(epoch, 1)
+        beta     = self.annealing_bl(epoch, 10)
         return mse_loss + beta * kl_loss, beta, kl_loss
 
     def _critic_loss(self, feat_TBH, act_TBA, nxt_TBD, belief_TB1, hT, rew_TB1, done_TB1, importance_weights, is_batch_rl: bool):
@@ -276,7 +276,7 @@ class SACRNNBeliefSeqDroq(PolicyBase):
             writer = SummaryWriter(log_dir=log_dir); local_writer = True
 
         # (optional) early return gate
-        if not is_batch_rl and (self._upd * 50) // self.buf.data_num >= 50 and self.buf.data_num >= 10000:
+        if not is_batch_rl and (epoch >= self.buf.data_num or self.buf.data_num <= 10000):
             return False
 
         # ---------- Critic + Belief phase ----------
@@ -319,7 +319,7 @@ class SACRNNBeliefSeqDroq(PolicyBase):
 
 
         # ---------- Actor (+ temperature) phase ----------
-        for batch in self._iter_batches(self.cfg.batch_size, trace_len=100, device=self.device):
+        for batch in self.buf.get_sequences(self.cfg.batch_size, trace_length=100, device=self.device):
             obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch
             T, B, _ = obs_TBD.shape
 
@@ -334,8 +334,10 @@ class SACRNNBeliefSeqDroq(PolicyBase):
                 ent_loss = self._entropy_loss(logp_TB1)
                 self._step_with_clip([self.log_alpha], self.alpha_opt, ent_loss, clip_norm=1e9)  # no real grad clipping needed
 
-        # ---------- Epoch-end logging (kept minimal/clean) ----------
-        writer.add_scalar("loss/actor_loss", a_loss.item(), epoch)
+            # ---------- Epoch-end logging (kept minimal/clean) ----------
+            writer.add_scalar("loss/actor_loss", a_loss.item(), epoch)
+            if self.alpha_opt is not None:
+                writer.add_scalar("loss/ent_loss", ent_loss.item(), epoch)
 
         if local_writer:
             writer.flush(); writer.close()
