@@ -1,11 +1,11 @@
-from typing import List, Optional, Iterable, Dict, Tuple
+from typing import List, Optional, Iterable, Dict
 from net_util import register_buffer
 import torch as th
 import numpy as np
 import random
 import math
 
-# ---------------- helpers (unchanged) ----------------
+# ---------------- helpers (unchanged pieces) ----------------
 def _as_1d_float(x):
     if isinstance(x, th.Tensor):
         x = x.detach().cpu().numpy()
@@ -54,7 +54,7 @@ def var_unbiased(summary):
 class Episode:
     __slots__ = ("obs","actions","rewards","next_obs","dones","loss",
                  "reward_summary","gamma_summary","avg_return","interference",
-                 "data_num")
+                 "data_num","_heap_idx")
     def __init__(self, obs_np, act_np, rew_np, next_obs_np, done_np, device,
                  init_loss: float, gamma: float, interference=0):
         self.obs = th.tensor(obs_np, device=device)
@@ -62,7 +62,7 @@ class Episode:
         self.rewards = th.tensor(rew_np, device=device)
         self.next_obs = th.tensor(next_obs_np, device=device)
         self.dones = th.tensor(done_np, device=device)
-        self.loss = float(init_loss)  # kept for iface parity; not used by uniform buffer
+        self.loss = float(init_loss)  # kept but unused for sampling
         self.reward_summary = summarize(rew_np)
         self.gamma_summary  = summarize((1 - done_np) * gamma)
         self.data_num = self.reward_summary[0]
@@ -72,6 +72,7 @@ class Episode:
             sq += G*G
         self.avg_return = sq / max(1, self.data_num)
         self.interference = float(interference)
+        self._heap_idx = -1  # maintained by buffer
 
     @property
     def length(self): return int(self.obs.shape[0])
@@ -80,67 +81,71 @@ class Episode:
         L = max(0, self.data_num - T)
         return 0 if L <= 0 else np.random.randint(0, L)
 
-# ---------------- uniform FIFO replay with circular storage ----------------
+# ---------------- uniform (no-PER) replay with array list ----------------
 @register_buffer
-class RNNUniformReplayFIFO:
+class RNNPriReplayFiFo:
     """
-    FIFO episode buffer with UNIFORM sampling.
-
-    - Episodes are stored in a fixed-size circular array.
-    - When capacity is exceeded, the oldest episode is evicted automatically.
-    - Sampling is uniform over current episodes; start points are uniform per episode.
-    - Importance-sampling weights are all 1 (no PER).
-    - Public API mirrors the previous buffer for easy swapping.
+    Uniform replay:
+    - Episodes stored in a simple list.
+    - Sampling is uniform over episodes (with replacement).
+    - Importance-sampling weights are all ones.
     """
     def __init__(self,
                  device: str = "cuda",
                  capacity: int = 10000,
                  gamma: float = 0.99,
-                 writer=None):
-        self.device   = device
+                 **kwargs):
+        self.device = device
         self.capacity = int(capacity)
-        self.gamma    = float(gamma)
-        self.writer   = writer
+        self.gamma = float(gamma)
 
-        # circular storage
-        self._store: List[Optional[Episode]] = [None] * self.capacity
-        self._head: int  = 0   # logical index of the oldest element
-        self._size: int  = 0   # number of valid elements in store
+        self.heap: List[Episode] = []  # simple list; keep name for compatibility
 
-        # running stats (cumulative, not a sliding-window)
+        # stats (kept from original)
         self.reward_summary = (0,0.0,0.0)
         self.gamma_summary  = (0,0.0,0.0)
         self.avg_return = 0.0
         self.run_return = 0.0
         self.data_num = 0
         self.sigma = 0.0
+        
+        self.writer = kwargs.get('writer', None)
 
-    # ----- circular helpers -----
-    def _phys(self, logical_idx: int) -> int:
-        """Map logical 0.._size-1 to physical index in the ring."""
-        return (self._head + logical_idx) % self.capacity
+    # ------------- list utilities (names kept for compatibility) -------------
+    def _swap(self, i: int, j: int):
+        self.heap[i], self.heap[j] = self.heap[j], self.heap[i]
+        self.heap[i]._heap_idx = i
+        self.heap[j]._heap_idx = j
 
-    def _append_episode(self, ep: Episode):
-        if self._size < self.capacity:
-            pos = self._phys(self._size)
-            self._store[pos] = ep
-            self._size += 1
-        else:
-            # overwrite the oldest (FIFO)
-            pos = self._phys(0)
-            self._store[pos] = ep
-            self._head = (self._head + 1) % self.capacity  # move head forward
+    def _push(self, ep: Episode):
+        ep._heap_idx = len(self.heap)
+        self.heap.append(ep)
 
-    def _get_ep_by_logical(self, logical_idx: int) -> Episode:
-        return self._store[self._phys(logical_idx)]  # type: ignore
+    def _remove_at(self, i: int):
+        n = len(self.heap)
+        if i < 0 or i >= n: return
+        last = n - 1
+        if i != last:
+            self._swap(i, last)
+        ep = self.heap.pop()
+        ep._heap_idx = -1
+
+    def _evict_random(self):
+        n = len(self.heap)
+        if n == 0: return
+        idx = random.randint(0, n - 1)
+        self._remove_at(idx)
+
+    def _rebalance_if_needed(self, just_updated: int = 1):
+        # No-op in uniform replay (kept for API compatibility)
+        return
 
     # ---------------- construction / add / extend ----------------
     @staticmethod
     def build_from_traces(traces, device="cuda", reward_agg="sum", capacity=10000,
                           init_loss: Optional[float] = None, **kwargs):
-        buf = RNNUniformReplayFIFO(
+        buf = RNNPriReplayFiFo(
             device=device, capacity=capacity, gamma=kwargs.get("gamma", 0.99),
-            writer=kwargs.get("writer", None)
         )
         interfs = kwargs.get("interference_vals", [0]*len(traces))
         for (states, actions, rewards, network_output), interf in zip(traces, interfs):
@@ -158,12 +163,12 @@ class RNNUniformReplayFIFO:
         ep = Episode(
             obs_np, act_np, rew_np, next_obs_np, done_np,
             device=self.device,
-            init_loss=100.0 if init_loss is None else float(init_loss),
+            init_loss=100.0 if init_loss is None else float(init_loss),  # kept but unused
             gamma=self.gamma,
             interference=interference
         )
 
-        # cumulative (not windowed) stats
+        # running stats (unchanged)
         self.reward_summary = merge(self.reward_summary, ep.reward_summary)
         self.gamma_summary  = merge(self.gamma_summary, ep.gamma_summary)
         if self.reward_summary[0] > 0:
@@ -174,34 +179,37 @@ class RNNUniformReplayFIFO:
             self.data_num += 1
             if self.writer is not None:
                 self.writer.add_scalar("data/return", self.run_return, self.data_num)
+
         self.sigma = math.sqrt(
             max(0.0, var_unbiased(self.reward_summary)) +
             max(0.0, var_unbiased(self.gamma_summary)) * max(0.0, self.avg_return)
         )
 
-        # FIFO append
-        self._append_episode(ep)
+        # insert & capacity control
+        self._push(ep)
+        if len(self.heap) > self.capacity:
+            self._evict_random()
 
-    # ---------------- priority updates (no-op for uniform FIFO) ----------------
+    # ---------------- priority updates (no-op) ----------------
     def update_episode_losses(self, ep_ids: List[int], losses: Iterable[float]):
-        # uniform buffer does not use priorities; keep method for API parity
+        # No prioritization -> nothing to update; keep API
         return
 
-    # ---------------- sampling (uniform) ----------------
-    def _choose_episode_ids(self, batch_size: int) -> Tuple[List[int], np.ndarray]:
-        N = self._size
-        if N == 0:
-            return [], np.empty((0,), dtype=np.float32)
-        # logical ids 0..N-1
+    # ---------------- sampling ----------------
+    def _choose_episode_ids(self, batch_size: int):
+        N = len(self.heap)
+        if N == 0: return [], None
+        # Uniform with replacement
         chosen = np.random.randint(0, N, size=batch_size, dtype=np.int64)
-        probs = np.full((N,), 1.0 / N, dtype=np.float64)  # uniform over episodes
+        # Uniform probs array of length N (for API compatibility)
+        probs = np.full(N, 1.0 / N, dtype=np.float64)
         return chosen.tolist(), probs
 
-    def _gather_batch(self, logical_ids: List[int], starts: List[int], T: int):
+    def _gather_batch(self, ep_ids: List[int], starts: List[int], T: int):
         obs_TB, act_TB, rew_TB, nxt_TB, done_TB = [], [], [], [], []
         interfs = []
-        for lid, s in zip(logical_ids, starts):
-            ep = self._get_ep_by_logical(lid)
+        for eid, s in zip(ep_ids, starts):
+            ep = self.heap[eid]
             e = s + T
             obs_TB.append(ep.obs[s:e])
             act_TB.append(ep.actions[s:e])
@@ -217,22 +225,24 @@ class RNNUniformReplayFIFO:
         interf_B = th.tensor(interfs, device=obs_TB.device, dtype=th.float32).unsqueeze(-1)
         return obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B
 
-    def _ones_is_weights(self, n: int) -> th.Tensor:
-        return th.ones((n, 1), dtype=th.float32, device=self.device)
+    def _calc_is_weights(self, ep_ids: List[int], probs: np.ndarray, beta: Optional[float] = None):
+        # Always return ones (no importance correction in uniform sampling)
+        B = len(ep_ids)
+        return th.ones((B, 1), dtype=th.float32)
 
     # ---------------- public batch APIs ----------------
     def get_minibatches(self, batch_size: int, trace_length: int = 100, device: Optional[th.device|str] = None):
-        if self._size == 0: return
+        if not self.heap: return
         dev = th.device(device) if device is not None else None
-
         ep_ids, probs = self._choose_episode_ids(batch_size)
-        if len(ep_ids) == 0: return
-        starts = [self._get_ep_by_logical(lid).start_point(trace_length) for lid in ep_ids]
+        starts = [self.heap[eid].start_point(trace_length) for eid in ep_ids]
         obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(ep_ids, starts, trace_length)
 
-        # IS weights = 1; probs (for logging) = 1/N for chosen ids
-        is_w_B1 = self._ones_is_weights(len(ep_ids))
-        prob_B1 = th.full((len(ep_ids), 1), 1.0 / max(1, self._size), dtype=th.float32)
+        is_w_B1 = self._calc_is_weights(ep_ids, probs)
+        # Keep "probs" tensor for compatibility (uniform 1/N)
+        N = len(self.heap)
+        prob_vals = np.full(len(ep_ids), 1.0 / max(1, N), dtype=np.float32)
+        prob_B1 = th.tensor(prob_vals, dtype=th.float32).unsqueeze(-1)
 
         if dev is not None and dev.type == "cuda" and obs_TB.device.type == "cpu":
             obs_TB   = obs_TB.pin_memory().to(dev, non_blocking=True)
@@ -252,16 +262,16 @@ class RNNUniformReplayFIFO:
             yield (obs_TB[t], act_TB[t], rew_TB[t], nxt_TB[t], done_TB[t], info)
 
     def get_sequences(self, batch_size: int, trace_length: int = 100, device: Optional[th.device|str] = None):
-        if self._size == 0 or self.data_num < 10e3: return
+        if not self.heap or self.data_num < 10e3: return
         dev = th.device(device) if device is not None else None
-
         ep_ids, probs = self._choose_episode_ids(batch_size)
-        if len(ep_ids) == 0: return
-        starts = [self._get_ep_by_logical(lid).start_point(trace_length) for lid in ep_ids]
+        starts = [self.heap[eid].start_point(trace_length) for eid in ep_ids]
         obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(ep_ids, starts, trace_length)
 
-        is_w_B1 = self._ones_is_weights(len(ep_ids))
-        prob_B1 = th.full((len(ep_ids), 1), 1.0 / max(1, self._size), dtype=th.float32)
+        is_w_B1 = self._calc_is_weights(ep_ids, probs)
+        N = len(self.heap)
+        prob_vals = np.full(len(ep_ids), 1.0 / max(1, N), dtype=np.float32)
+        prob_B1 = th.tensor(prob_vals, dtype=th.float32).unsqueeze(-1)
 
         if dev is not None and dev.type == "cuda" and obs_TB.device.type == "cpu":
             obs_TB   = obs_TB.pin_memory().to(dev, non_blocking=True)

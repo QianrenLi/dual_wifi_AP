@@ -171,19 +171,20 @@ class TraceWatcher:
         interference_vals: List[int] = []
 
         # infer interference id from each path's parent dir name (same as before)
-        for path in paths:
-            res = re.search(self.id_regex, path.parent.stem)
+        for tp in paths:
+            res = re.search(self.id_regex, tp.parent.stem)
             if res is None:
                 interference_vals.append(0)
             else:
                 interference_vals.append(int(res.group(0)))
-
-        for tp in paths:
             s, a, r, net = trace_collec(
                 str(tp),
                 state_descriptor=self.control_config.get("state_cfg", None),
                 reward_descriptor=self.control_config.get("reward_cfg", None),
             )
+            ## TODO: make this hyperparameter
+            if len(s) < 100:
+                continue
             s_nor = []
             if self._state_tf:
                 for _s in s:

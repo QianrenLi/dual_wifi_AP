@@ -113,7 +113,8 @@ def main():
         reward_agg=roll_cfg.get("reward_agg", "sum"),
         buffer_max=roll_cfg.get("buffer_max", 10_000_000),
         interference_vals = interference_vals,
-        writer = writer
+        writer = writer,
+        capacity = 10000 if args.batch_rl else 300,
     )
 
     # Policy
@@ -128,6 +129,7 @@ def main():
         ckpt_dir = Path("net_util/net_cp") / cfg_stem
         next_id = 1
     else:
+        print("Load model")
         policy.load(args.load_path, device="cuda")
         ckpt_dir = Path(args.load_path).parent
         next_id = int(Path(args.load_path).stem) + 1
@@ -157,16 +159,15 @@ def main():
     epoch = 0
     store_int = 1000
     last_trained_time = time.time()
-    while True:
-        # start_time = time.time()
-        if args.batch_rl:
+    while True:        
+        trained = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)    
+        res = _extend_with_new()
+        
+        if res:
             for _ in range(10):
                 trained = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
-        else:
-            trained = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
+                epoch += 1
         
-        # print(time.time() - start_time)
-        _extend_with_new()
         if not trained:
             time.sleep(1)
             continue
@@ -179,7 +180,7 @@ def main():
 
         # Big jump → save and roll checkpoint id
         trained_time = time.time()
-        if delta >= args.delta_max or (trained_time - last_trained_time) >= 60:
+        if delta >= args.delta_max or (trained_time - last_trained_time) >= 10:
             actor_before = actor_after
             last_trained_time = trained_time
             policy.save(latest_path)
