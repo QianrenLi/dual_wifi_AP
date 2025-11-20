@@ -41,7 +41,7 @@ class SACRNNBeliefSeqDroq_Config:
     seed: int = 0
     obs_dim: int = 6
     belief_dim: int = 1
-    network_module_path: str = "net_util.model.sac_rnn_belief"
+    network_module_path: str = "net_util.model.sac_dropout_q"
     load_path = "latest.pt"
     
     batch_rl = False
@@ -100,7 +100,7 @@ class SACRNNBeliefSeqDroq(PolicyBase):
         self.retrain_idx = 0
         self.max_retrain = 5
         
-        self.critic_update_steps = 10
+        self.critic_update_steps = 5
 
     def _alpha(self):
         return (self.log_alpha.exp() if self.log_alpha is not None else self.alpha_tensor).detach()
@@ -133,9 +133,10 @@ class SACRNNBeliefSeqDroq(PolicyBase):
 
     def cdl_loss(
         self,
-        feat_TBH: th.Tensor,                 # [T,B,H]
+        feat_TBH: th.Tensor,                 # [T,B,H] (derived from obs + belief_curr)
         nxt_TBD: th.Tensor,                  # [T,B,D]
-        belief_seq_TB1_sac: th.Tensor,       # [T,B,1]
+        belief_curr_TB1: th.Tensor,          # [T,B,1]
+        belief_next_TB1: th.Tensor,          # [T,B,1]
         act_TBA: th.Tensor,                  # [T,B,A]
         num_random: int = 10,
         beta_cql: float = 0.05,
@@ -154,7 +155,9 @@ class SACRNNBeliefSeqDroq(PolicyBase):
 
             # π(s_{t+1}) actions
             h0_enc, _ = self.net.init_hidden(B, device)
-            feat_next_TBH, _ = self.net.encode_seq(nxt_TBD, belief_seq_TB1_sac, h0_enc)
+            # [FIX] Encode Next Sequence using Next Belief
+            feat_next_TBH, _ = self.net.encode_seq(nxt_TBD, belief_next_TB1, h0_enc)
+            
             a_next_TBA, _ = self.net.sample_from_features(feat_next_TBH, detach_feat_for_actor=True)
             a_next_TBNA = a_next_TBA.unsqueeze(2).expand(T, B, num_random, A)
 
@@ -188,22 +191,12 @@ class SACRNNBeliefSeqDroq(PolicyBase):
         # stats for logging
         min_q_rand = th.minimum(q1_rand, q2_rand).mean()
         min_q_curr = th.minimum(q1_curr, q2_curr).mean()
-        min_q_next = th.minimum(q1_next, q2_next).mean()
         min_q_bc   = th.minimum(q1_bc,   q2_bc).mean()
         
         stats = {
             "cdl/penalty_total": penalty.detach(),
-            # "cdl/cql1": cql1.detach(),
-            # "cdl/cql2": cql2.detach(),
-            # "cdl/minQ_bc_mean":   min_q_bc.detach(),
-            # "cdl/minQ_rand_mean": min_q_rand.detach(),
-            # "cdl/minQ_curr_mean": min_q_curr.detach(),
-            # "cdl/minQ_next_mean": min_q_next.detach(),
             "cdl/gap_rand_bc": (min_q_rand - min_q_bc).detach(),
             "cdl/gap_curr_bc": (min_q_curr - min_q_bc).detach(),
-            # "cdl/gap_next_bc": (min_q_next - min_q_bc).detach(),
-            # "cdl/std_cat_q1": cat_q1.squeeze(-1).std(dim=2).mean().detach(),
-            # "cdl/std_cat_q2": cat_q2.squeeze(-1).std(dim=2).mean().detach(),
         }
         
         return penalty, stats
@@ -225,17 +218,22 @@ class SACRNNBeliefSeqDroq(PolicyBase):
         logv_last_BH = logvar_TB1[-1]
         mse_loss = (F.smooth_l1_loss(y_last_B1, interf_B1, reduction='none') * iw_B1).mean()
         kl_loss  = (0.5 * (mu_last_BH.pow(2) + logv_last_BH.exp() - logv_last_BH - 1.0)).mean()
-        beta     = self.annealing_bl(epoch, 10)
+        beta     = self.annealing_bl(epoch, 1)
         return mse_loss + beta * kl_loss, beta, kl_loss
 
-    def _critic_loss(self, feat_TBH, act_TBA, nxt_TBD, belief_TB1, hT, rew_TB1, done_TB1, importance_weights, is_batch_rl: bool):
+    def _critic_loss(self, feat_TBH, act_TBA, nxt_TBD, belief_curr_TB1, belief_next_TB1, hT, rew_TB1, done_TB1, importance_weights, is_batch_rl: bool):
         alpha = self._alpha()
         with th.no_grad():
-            backup_TB1 = self.net.target_backup_seq(nxt_TBD, belief_TB1, hT, rew_TB1, done_TB1, self.cfg.gamma, alpha)
+            # [FIX] Use belief_next_TB1 for the target backup
+            backup_TB1 = self.net.target_backup_seq(nxt_TBD, belief_next_TB1, hT, rew_TB1, done_TB1, self.cfg.gamma, alpha)
 
         q1_TB1, q2_TB1 = self.net.q(feat_TBH, act_TBA)
         diff = th.stack([q1_TB1, q2_TB1], dim=0) - backup_TB1
-        diff = diff / self.buf.sigma
+        
+        # [Minor Fix] Added epsilon to sigma division to prevent potential NaNs
+        safe_sigma = self.buf.sigma if hasattr(self.buf, 'sigma') and self.buf.sigma > 1e-6 else 1.0
+        diff = diff / safe_sigma
+        
         c_loss_per_t = diff.pow(2).mean(dim=0)      # [T,B,1]
         c_loss_batch = c_loss_per_t.mean(dim=(0,2)) # [B]
         c_loss = (c_loss_batch * importance_weights).mean()
@@ -243,8 +241,13 @@ class SACRNNBeliefSeqDroq(PolicyBase):
         cdl_stats = None
         if is_batch_rl:
             cdl_penalty, cdl_stats = self.cdl_loss(
-                feat_TBH=feat_TBH, nxt_TBD=nxt_TBD, belief_seq_TB1_sac=belief_TB1,
-                act_TBA=act_TBA, num_random=10, beta_cql=5 * 20 / self.buf.sigma,
+                feat_TBH=feat_TBH, 
+                nxt_TBD=nxt_TBD, 
+                belief_curr_TB1=belief_curr_TB1, # [FIX] Explicit separation
+                belief_next_TB1=belief_next_TB1, # [FIX] Explicit separation
+                act_TBA=act_TBA, 
+                num_random=10, 
+                beta_cql=5 * 20 / safe_sigma,
             )
             c_loss = c_loss + cdl_penalty
         return c_loss, cdl_stats
@@ -254,7 +257,7 @@ class SACRNNBeliefSeqDroq(PolicyBase):
             a_pi_TBA, logp_TB1 = self.net.sample_from_features(feat_TBH)
             q1_pi, q2_pi = self.net.q(feat_TBH.detach(), a_pi_TBA)
             alpha = self._alpha()
-            a_loss = (alpha * logp_TB1 - (q1_pi + q2_pi) / 2).mean()
+            a_loss = (alpha * logp_TB1 - th.stack([q1_pi, q2_pi], dim=0).mean(dim=0)).mean()
             return a_loss, logp_TB1
 
     def _entropy_loss(self, logp_TB1):
@@ -276,7 +279,7 @@ class SACRNNBeliefSeqDroq(PolicyBase):
             writer = SummaryWriter(log_dir=log_dir); local_writer = True
 
         # (optional) early return gate
-        if not is_batch_rl and (epoch >= self.buf.data_num or self.buf.data_num <= 10000):
+        if not is_batch_rl and (epoch >= self.buf.data_num or self.buf.data_num <= 2000):
             return False
 
         # ---------- Critic + Belief phase ----------
@@ -285,26 +288,28 @@ class SACRNNBeliefSeqDroq(PolicyBase):
                 obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch
                 T, B, _ = obs_TBD.shape
                 importance_weights = info['is_weights'].detach().squeeze(-1)
+                
+                # 1. Current Belief (Gradient flows here for belief update later if needed, though usually detached for critic)
+                z_curr_TB1, mu_TB1, logvar_TB1, y_hat_TB1 = self._predict_belief_seq(obs_TBD)
+
+                # 2. [FIX] Next Belief (Purely for Target/CDL calculation, no grad needed)
+                with th.no_grad():
+                    z_next_TB1, _, _, _ = self._predict_belief_seq(nxt_TBD)
 
                 h0, _ = self.net.init_hidden(B, self.device)
-                z_TB1, mu_TB1, logvar_TB1, y_hat_TB1 = self._predict_belief_seq(obs_TBD)
-                b_loss, beta, kl_loss = self._belief_supervision_loss(
-                    mu_TB1, logvar_TB1, y_hat_TB1,
-                    interf_B1=info["interference"], iw_B1=info["is_weights"].detach(),
-                    epoch=epoch
-                )
-
-                feat_TBH, hT = self._encode_with_belief(obs_TBD, z_TB1, h0)
+                feat_TBH, hT = self._encode_with_belief(obs_TBD, z_curr_TB1, h0)
+                
+                # 3. Pass BOTH beliefs to critic loss
                 c_loss, cdl_stats = self._critic_loss(
-                    feat_TBH, act_TBA, nxt_TBD, z_TB1, hT, rew_TB1, done_TB1,
-                    importance_weights, is_batch_rl
+                    feat_TBH, act_TBA, nxt_TBD, 
+                    belief_curr_TB1=z_curr_TB1, 
+                    belief_next_TB1=z_next_TB1, # <--- Passed here
+                    hT=hT, rew_TB1=rew_TB1, done_TB1=done_TB1,
+                    importance_weights=importance_weights, is_batch_rl=is_batch_rl
                 )
 
-                # optimize
-                self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=10.0)
-                self._step_with_clip(self.net.belief_parameteres(), self.belief_opt, b_loss, clip_norm=5.0)
-
-                # targets
+                self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=100.0)
+                
                 self.net._soft_sync(self.cfg.tau)
                 self._upd += 1
                 self._global_step += 1
@@ -314,21 +319,25 @@ class SACRNNBeliefSeqDroq(PolicyBase):
                         writer.add_scalar(k, v.item(), self._global_step)
                 
                 writer.add_scalar("loss/critic", c_loss.item(), self._global_step)
-                writer.add_scalar("loss/belief", b_loss.item(), self._global_step)
-                writer.add_scalar("loss/KL", (beta * kl_loss).item(), self._global_step)
-
-
+                
         # ---------- Actor (+ temperature) phase ----------
         for batch in self.buf.get_sequences(self.cfg.batch_size, trace_length=100, device=self.device):
             obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch
             T, B, _ = obs_TBD.shape
 
-            h0, _ = self.net.init_hidden(B, self.device)
             z_TB1, mu_TB1, logvar_TB1, y_hat_TB1 = self._predict_belief_seq(obs_TBD)
+            b_loss, beta, kl_loss = self._belief_supervision_loss(
+                mu_TB1, logvar_TB1, y_hat_TB1,
+                interf_B1=info["interference"], iw_B1=info["is_weights"].detach(),
+                epoch=epoch
+            )
+            
+            h0, _ = self.net.init_hidden(B, self.device)
             feat_TBH, hT = self._encode_with_belief(obs_TBD, z_TB1, h0)
-
             a_loss, logp_TB1 = self._actor_loss(feat_TBH)
-            self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=5.0)
+            
+            self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=50.0)
+            self._step_with_clip(self.net.belief_parameteres(), self.belief_opt, b_loss, clip_norm=50.0)
 
             if self.alpha_opt is not None:
                 ent_loss = self._entropy_loss(logp_TB1)
@@ -336,6 +345,8 @@ class SACRNNBeliefSeqDroq(PolicyBase):
 
             # ---------- Epoch-end logging (kept minimal/clean) ----------
             writer.add_scalar("loss/actor_loss", a_loss.item(), epoch)
+            writer.add_scalar("loss/belief", b_loss.item(), epoch)
+            writer.add_scalar("loss/KL", (beta * kl_loss).item(), epoch)
             if self.alpha_opt is not None:
                 writer.add_scalar("loss/ent_loss", ent_loss.item(), epoch)
 

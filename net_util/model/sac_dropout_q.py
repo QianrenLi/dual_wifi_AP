@@ -55,17 +55,16 @@ class Network(nn.Module):
         self.mu          = nn.Linear(hidden, act_dim)
         self.logstd_head = nn.Linear(hidden, act_dim)
         self.logstd_bias = nn.Parameter(th.full((act_dim,), init_log_std))
-
         # Critics
         def _make_q():
             return nn.Sequential(
                 nn.Linear(hidden + act_dim, hidden),
-                nn.Dropout(0.2),
+                nn.Dropout(0.01),
                 nn.LayerNorm(hidden),
                 nn.GELU(),
                 
                 nn.Linear(hidden, hidden),
-                nn.Dropout(0.2),
+                nn.Dropout(0.01),
                 nn.LayerNorm(hidden),
                 nn.GELU(),
                 
