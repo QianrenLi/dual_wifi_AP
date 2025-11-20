@@ -275,7 +275,7 @@ class SACRNNBeliefSeq(PolicyBase):
 
         # One pass per sequence batch
         got_any = False
-        for batch in self.buf.get_sequences(self.cfg.batch_size, trace_length=100, device=self.device):
+        for batch in self.buf.get_sequences(self.cfg.batch_size, trace_length=6000//5, device=self.device):
             got_any = True
             obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch  # time-major
             T, B, _ = obs_TBD.shape
