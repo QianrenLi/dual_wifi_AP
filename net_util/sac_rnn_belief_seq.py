@@ -158,18 +158,18 @@ class SACRNNBeliefSeq(PolicyBase):
         z_TB1, _, mu_TB1, logvar_TB1, y_hat_TB1 = self.net.belief_predict_seq(obs_TBD, belief_h0)
 
         # Last step supervision
-        mu_last_BH = mu_TB1[-1]
-        logv_last_BH = logvar_TB1[-1]
-        y_last_B1 = y_hat_TB1[-1]
+        # mu_last_BH = mu_TB1[-1]
+        # logv_last_BH = logvar_TB1[-1]
+        # y_last_B1 = y_hat_TB1[-1]
         
         interf_B1 = info["interference"].to(device)
         iw_B1 = info["is_weights"].detach().to(device)
 
         # 1. MSE Loss (L1)
-        mse_loss = (y_last_B1 - interf_B1).pow(2).mean()
+        mse_loss = (y_hat_TB1 - interf_B1).pow(2).mean()
 
         # 2. KL Loss (D_KL[N(mu, logvar) || N(0, I)])
-        kl_loss = 0.5 * (mu_last_BH.pow(2) + logv_last_BH.exp() - logv_last_BH - 1.0).mean()
+        kl_loss = 0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0).mean()
 
         # Total belief loss with annealing
         beta = self._get_beta(epoch)

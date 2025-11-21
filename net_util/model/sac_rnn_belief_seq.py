@@ -51,7 +51,11 @@ class Network(nn.Module):
         # nn.init.zeros_(self.belief_logvar_head.weight)
         # nn.init.constant_(self.belief_logvar_head.bias, -2.0)
         
-        self.belief_decoder = nn.Linear(belief_dim, 1)
+        self.belief_decoder = nn.Sequential(
+            nn.Linear(belief_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1)
+        )
 
         # Actor
         self.mu          = nn.Linear(hidden, act_dim)
@@ -112,8 +116,7 @@ class Network(nn.Module):
         # reparameterize
         z_BH = self._reparameterize(mu_BH, logvar_BH)             # [B, Hb]
 
-        z_for_dec = z_BH.detach()
-        y_hat_B1 = self.belief_decoder(z_for_dec)                 # [B, 1]
+        y_hat_B1 = self.belief_decoder(z_BH)                 # [B, 1]
         return z_BH, h1, mu_BH, logvar_BH, y_hat_B1
 
     def belief_predict_seq(self, obs_TBD: th.Tensor, h0: th.Tensor):
@@ -124,8 +127,7 @@ class Network(nn.Module):
 
         z_TBH = self._reparameterize(mu_TBH, logvar_TBH)          # [T, B, Hb]
 
-        z_for_dec = z_TBH.detach()
-        y_hat_TB1 = self.belief_decoder(z_for_dec)                # [T, B, 1]
+        y_hat_TB1 = self.belief_decoder(z_TBH)                # [T, B, 1]
         return z_TBH, hT, mu_TBH, logvar_TBH, y_hat_TB1
 
     
