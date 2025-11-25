@@ -36,19 +36,6 @@ class Network(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, hidden=128, belief_dim=1,
                  init_log_std=-2.0, log_std_min=-20.0, log_std_max=2.0, scale_log_offset=None):
         super().__init__()
-        self.log_std_min, self.log_std_max = float(log_std_min), float(log_std_max)
-
-        # Belief
-        self.belief_encoder_gru = FeatureExtractorGRU(obs_dim, hidden)
-        self.belief_encoder_mu = nn.Linear(hidden, belief_dim)
-        self.belief_encoder_var = nn.Linear(hidden, belief_dim)
-        
-        self.belief_decoder = nn.Sequential(
-            nn.Linear(belief_dim, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, 1)
-        )
-
         # Critics
         def _make_q():
             return nn.Sequential(
@@ -57,15 +44,29 @@ class Network(nn.Module):
                 nn.Linear(hidden, 1),
             )
 
-        self.q1, self.q2 = _make_q(), _make_q()
+        self.log_std_min, self.log_std_max = float(log_std_min), float(log_std_max)
+
+        # Belief
+        self.belief_encoder_gru = FeatureExtractorGRU(obs_dim, hidden)
+        self.belief_encoder_mu  = nn.Linear(hidden, belief_dim)
+        self.belief_encoder_var = nn.Linear(hidden, belief_dim)
         
-        self.fe_t = FeatureExtractorGRU(obs_dim + belief_dim, hidden) 
-        self.q1_t, self.q2_t = _make_q(), _make_q()
+        self.belief_decoder     = nn.Sequential(
+            nn.Linear(belief_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1)
+        )
+
+        self.q1, self.q2        = _make_q(), _make_q()
+        
+        self.fe_t               = FeatureExtractorGRU(obs_dim + belief_dim, hidden) 
+        self.q1_t, self.q2_t    = _make_q(), _make_q()
 
         # Actor
-        self.fe   = FeatureExtractorGRU(obs_dim + belief_dim, hidden)
-        self.mu          = nn.Linear(hidden, act_dim)
-        self.logstd_head = nn.Linear(hidden, act_dim)
+        self.fe                 = FeatureExtractorGRU(obs_dim + belief_dim, hidden)
+        self.mu                 = nn.Linear(hidden, act_dim)
+        # self.logstd_head = nn.Linear(hidden, act_dim)
+        self.logstd_head        = nn.Parameter(th.full((act_dim,), init_log_std))
 
         self._hard_sync()
         self.scale_log_offset = scale_log_offset
@@ -110,10 +111,11 @@ class Network(nn.Module):
     def action_compute(self, feat: th.Tensor, is_evaluate = False):
         # penultimate normalization (pnorm)
         feat = feat / feat.norm(p=1, dim=-1, keepdim=True).clamp_min(1e-8)
-        mu = self.mu(feat)
-        std = th.clamp(self.logstd_head(feat), self.log_std_min, self.log_std_max).exp()
+        mean_action = self.mu(feat)
+        std = th.clamp(self.logstd_head, self.log_std_min, self.log_std_max).exp()
         
-        dist = th.distributions.Normal(mu, std, validate_args=False)
+        dist = th.distributions.Normal(mean_action, std, validate_args=False)
+        
         if is_evaluate:
             u = dist.mode()
         else:
@@ -152,7 +154,7 @@ class Network(nn.Module):
 
     # param groups
     def actor_parameters(self):
-        return list(self.mu.parameters()) + list(self.logstd_head.parameters()) + list(self.fe.parameters())
+        return list(self.fe.parameters()) + list(self.mu.parameters()) + [self.logstd_head]
     
     def critic_parameters(self):
         return list(self.q1.parameters()) + list(self.q2.parameters())
