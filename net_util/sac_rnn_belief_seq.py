@@ -140,7 +140,7 @@ class SACRNNBeliefSeq(PolicyBase):
     @staticmethod
     def _step_with_clip(params_iterable, opt: th.optim.Optimizer, loss: Tensor, clip_norm: float | None) -> None:
         """Shared helper for backward + (optional) grad clipping + step."""
-        opt.zero_grad(set_to_none=True)
+        opt.zero_grad()
         loss.backward()
         if clip_norm is not None:
             th.nn.utils.clip_grad_norm_(params_iterable, clip_norm)
@@ -252,7 +252,7 @@ class SACRNNBeliefSeq(PolicyBase):
         """Returns: a_loss, qmin_pi (detached)"""
         alpha = self._alpha()
         q1_pi, q2_pi = self.net.critic_compute(feat_TBH, a_pi_TBA)
-        qmin_pi = th.min(q1_pi, q2_pi).detach()
+        qmin_pi = th.min(q1_pi, q2_pi)
         a_loss = (alpha * logp_TB1 - qmin_pi).mean()
         return a_loss, qmin_pi
 
