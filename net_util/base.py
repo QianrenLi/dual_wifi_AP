@@ -22,7 +22,8 @@ class PolicyBase:
         self,
         cmd_cls: Type[ControlCmd],
         seed: Optional[int] = None,
-        state_transform_dict: Optional[dict] = None
+        state_transform_dict: Optional[dict] = None,
+        reward_cfg: Optional[dict] = None,
     ):
         self.cmd_cls = cmd_cls
         self.action_dim: int = cmd_cls.__dim__()
@@ -30,7 +31,8 @@ class PolicyBase:
             random.seed(seed)
         self.net = None
         self.opt = None
-
+        self.reward_cfg = reward_cfg
+        
         self._state_tf: Optional[_StateTransform] = None
         if state_transform_dict:
             try:

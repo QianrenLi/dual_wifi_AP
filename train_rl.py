@@ -114,7 +114,7 @@ def main():
         buffer_max=roll_cfg.get("buffer_max", 10_000_000),
         interference_vals = interference_vals,
         writer = writer,
-        capacity = 10000 if args.batch_rl else 300,
+        capacity = 10000,
     )
 
     # Policy
@@ -122,7 +122,7 @@ def main():
     if args.batch_rl:
         pol_cfg.batch_rl = True
         
-    policy: PolicyBase = PolicyCls(ControlCmd, pol_cfg, rollout_buffer=buf, device="cuda")
+    policy: PolicyBase = PolicyCls(ControlCmd, pol_cfg, rollout_buffer=buf, device="cuda", reward_cfg = control_cfg.get("reward_cfg"))
 
     # Checkpoint pathing
     if not args.load_path or str(args.load_path).lower() == "none":
@@ -139,11 +139,11 @@ def main():
     # policy.load(latest_path, device="cuda")
 
     # TB + training
-    actor_before = _flatten_params(policy.net.mu)
+    actor_before = _flatten_params(policy.net.actor_parameters())
 
     def _extend_with_new():
         new_traces, interference_vals = watcher.poll_new_traces()
-        if new_traces:
+        if new_traces != []:
             policy.buf.extend(
                 new_traces,
                 device="cuda",
@@ -163,18 +163,13 @@ def main():
         trained = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)    
         res = _extend_with_new()
         
-        if res:
-            for _ in range(10):
-                trained = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
-                epoch += 1
-        
         if not trained:
             time.sleep(1)
             continue
         epoch += 1
         
         # Actor drift
-        actor_after = _flatten_params(policy.net.mu)
+        actor_after = _flatten_params(policy.net.actor_parameters())
         delta = float((actor_after - actor_before).norm(p=2).item())
         writer.add_scalar("params/delta_actor_epoch_L2", delta, epoch)
 
