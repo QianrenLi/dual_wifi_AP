@@ -17,7 +17,7 @@ class FeatureExtractorGRU(nn.Module):
     def init_state(self, bsz: int, device=None):
         return th.zeros(1, bsz, self.hidden, device=device)
     
-    def encode(self, obs: th.Tensor, h0: th.Tensor = None) -> th.Tensor:
+    def encode(self, obs: th.Tensor, h0: th.Tensor = None) -> Tuple[th.Tensor, th.Tensor]:
         if obs.dim() == 2:
             B, D = obs.shape
             h0 = self.init_state(B, device=obs.device) if h0 is None else h0
@@ -109,29 +109,29 @@ class Network(nn.Module):
                 tp.mul_(1 - tau).add_(sp, alpha=tau)
             for tp, sp in zip(self.fe_t.parameters(), self.fe.parameters()):
                 tp.mul_(1 - tau).add_(sp, alpha=tau)
-                
+    
     @staticmethod
     def _tanh_log_det(u: th.Tensor) -> th.Tensor:
-        # return 2 * (th.log(th.tensor(2.0, device=u.device)) - u - F.softplus(-2*u))
-        return th.log(1.0 - th.tanh(u) ** 2 + 1e-6)
+        return 2 * (th.log(th.tensor(2.0, device=u.device)) - u - F.softplus(-2*u))
+        # return th.log(1.0 - th.tanh(u) ** 2 + 1e-6)
 
-    def belief_encode(self, obs_BD: th.Tensor, b_h: th.Tensor = None, is_evaluate = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        feat_BH, b_h_next   = self.belief_encoder_gru.encode(obs_BD, b_h)
-        mu_BH               = self.belief_encoder_mu(feat_BH)
-        logvar_BH           = self.belief_encoder_var(feat_BH)
+    def belief_encode(self, obs: th.Tensor, b_h: th.Tensor = None, is_evaluate = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        feat, b_h_next   = self.belief_encoder_gru.encode(obs, b_h)
+        mu_v             = self.belief_encoder_mu(feat)
+        logvar           = self.belief_encoder_var(feat)
 
         # reparameterize
         if is_evaluate:
-            z_BH = th.distributions.Normal(mu_BH, (logvar_BH / 2).exp()).mode
+            latent = th.distributions.Normal(mu_v, (logvar / 2).exp()).mode
         else:
-            z_BH = th.distributions.Normal(mu_BH, (logvar_BH / 2).exp()).rsample()
-        return z_BH, b_h_next, mu_BH, logvar_BH
+            latent = th.distributions.Normal(mu_v, (logvar / 2).exp()).rsample()
+        return latent, b_h_next, mu_v, logvar
     
-    def belief_decode(self, z_BH: th.Tensor) -> th.Tensor:
-        return self.belief_decoder(z_BH)                 # [B, 1]
+    def belief_decode(self, latent: th.Tensor) -> th.Tensor:
+        return self.belief_decoder(latent)                 # [B, 1]
 
-    def feature_compute(self, obs_BD: th.Tensor, z_BH: th.Tensor, f_h: th.Tensor = None) -> Tuple[th.Tensor, th.Tensor]:
-        return self.fe.encode(th.cat([obs_BD, z_BH], dim=-1), f_h)   # [T,B,H]
+    def feature_compute(self, obs: th.Tensor, latent: th.Tensor, f_h: th.Tensor = None) -> Tuple[th.Tensor, th.Tensor]:
+        return self.fe.encode(th.cat([obs, latent], dim=-1), f_h)   # [T,B,H]
 
     def action_compute(self, feat: th.Tensor, is_evaluate = False):
         # penultimate normalization (pnorm)
@@ -153,7 +153,7 @@ class Network(nn.Module):
         a = th.tanh(u)
         return a, logp_n
 
-    def critic_compute(self, feat: th.Tensor, a: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+    def critic_compute(self, feat: th.Tensor, a: th.Tensor) -> th.Tensor:
         x = th.cat([feat, a], dim=-1)
         return self.q1(x)
 
@@ -168,7 +168,7 @@ class Network(nn.Module):
         vd: ValueDistribution,
         b_h: Optional[th.Tensor] = None,
         f_h: Optional[th.Tensor] = None
-    ) ->  Tuple[th.Tensor, th.Tensor]:
+    ) ->  th.Tensor:
         # 2) Encode the next sequence with target encoder from zero state
         z_TBH, _, _, _ = self.belief_encode(nxt_TBD, b_h, is_evaluate=True)
         

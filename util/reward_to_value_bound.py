@@ -65,17 +65,29 @@ class ValueDistribution:
         target_flat = th.zeros_like(dist_flat)               # [B, K]
         offset = th.arange(B, device=device).unsqueeze(1) * K  # [B, 1]
 
-        # Lower index contribution
+        eq_mask = (l == u)  # [B, K]
+        
         target_flat.view(-1).index_add_(
             0,
-            (l + offset).view(-1),
-            (dist_flat * (u.float() - b)).view(-1),
+            (l + offset)[eq_mask].view(-1),
+            dist_flat[eq_mask].view(-1)
         )
-        # Upper index contribution
+
+        # 3. Case l != u: Standard C51 linear interpolation
+        neq_mask = ~eq_mask
+        
+        # Lower index contribution (only where l != u)
         target_flat.view(-1).index_add_(
             0,
-            (u + offset).view(-1),
-            (dist_flat * (b - l.float())).view(-1),
+            (l + offset)[neq_mask].view(-1),
+            (dist_flat * (u.float() - b))[neq_mask].view(-1),
+        )
+        
+        # Upper index contribution (only where l != u)
+        target_flat.view(-1).index_add_(
+            0,
+            (u + offset)[neq_mask].view(-1),
+            (dist_flat * (b - l.float()))[neq_mask].view(-1),
         )
 
         return target_flat.view(orig_shape)
@@ -85,7 +97,7 @@ class ValueDistribution:
         self,
         dist: th.Tensor,        # (..., K)
         reward: th.Tensor,      # (..., 1)
-        d_TB1: th.Tensor,      # (..., 1)
+        d_TB1: th.Tensor,       # (..., 1)
         gamma: float,           # scalar
         alpha_logp: th.Tensor,  # (..., 1)
     ) -> th.Tensor:

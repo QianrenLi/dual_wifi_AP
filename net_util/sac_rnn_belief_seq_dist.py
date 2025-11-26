@@ -166,10 +166,14 @@ class SACRNNBeliefSeqDist(PolicyBase):
 
         writer.add_scalar("q/qmin_pi", kwargs['qmin_pi'].mean().item(), step)
         writer.add_scalar("policy/logp_pi", kwargs['logp_TB1'].mean().item(), step)
-        
-        if kwargs['cdl_stats'] is not None:
-            for k, v in kwargs['cdl_stats'].items():
-                writer.add_scalar(k, v.item(), step)
+        # q_key = "q_batch"   # change this to whatever name you actually use
+        # if q_key in kwargs and kwargs[q_key] is not None:
+        #     q_TBK: th.Tensor = kwargs[q_key]              # [T,B,K]
+        #     # Average over time and batch -> [K]
+        #     q_mean_K = q_TBK.mean(dim=(0, 1))             # [K]
+
+        #     # Option 1: log as a histogram (quick & compact)
+        #     writer.add_histogram("q/dist_mean", q_mean_K, step)
 
 
     ## Loss
@@ -202,7 +206,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
     def _critic_loss(
         self,
         feat_TBH: Tensor, act_TBA: Tensor, nxt_TBD: Tensor, rew_TB1: Tensor, done_TB1: Tensor, importance_weights: Tensor, b_h: Tensor | None = None, f_h: Tensor | None = None
-    ) -> Tuple[Tensor, Tensor, Dict[str, Tensor] | None]:
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         """Returns: c_loss, c_loss_batch, cdl_stats"""
 
         backup_q_TB1 = self.net.target_backup_seq(
@@ -219,15 +223,13 @@ class SACRNNBeliefSeqDist(PolicyBase):
         q1_TB1 = self.net.critic_compute(feat_TBH, act_TBA)     # [T,B,K]
         log_q = (q1_TB1.clamp_min(1e-8)).log()
         
-        kl_loss = F.kl_div(log_q, backup_q_TB1, reduction='none', log_target=False)  # [T,B, K]
-
-        c_loss_batch = kl_loss.sum(dim=-1).mean(0)                  # [B]
+        
+        kl_loss = - (backup_q_TB1 * (log_q)).sum(dim=-1)    # [T,B]
+        c_loss_batch = kl_loss.mean(0)                      # [B]
         
         c_loss = (c_loss_batch * importance_weights).sum() / (importance_weights.sum() + 1e-8)
 
-        cdl_stats = None
-
-        return c_loss, c_loss_batch.detach(), cdl_stats
+        return c_loss, c_loss_batch.detach(), q1_TB1.detach()
 
 
     def _actor_loss(self, feat_TBH: Tensor, a_pi_TBA: Tensor, logp_TB1: Tensor) -> Tuple[Tensor, Tensor]:
@@ -309,7 +311,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
             self._step_with_clip( [self.log_alpha], self.alpha_opt, ent_loss, clip_norm=None ) # type: ignore
         
         # Critic update
-        c_loss, c_loss_batch, cdl_stats = self._critic_loss(
+        c_loss, c_loss_batch, q_batch = self._critic_loss(
             feat_TBH.detach(), act_train, nxt_train, rew_train, done_train, importance_weights, b_h=h_burn, f_h=f_h_burn
         )
         self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=None)
@@ -324,7 +326,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
         if self._global_step % self.cfg.log_interval == 0:
             self._log_batch_stats(writer, self._global_step, 
                 a_loss=a_loss, c_loss=c_loss, b_loss=b_loss, ent_loss=ent_loss, logp_TB1=logp_TB1, 
-                qmin_pi=qmin_pi, cdl_stats=cdl_stats, belief_stats=belief_stats, is_batch_rl=is_batch_rl
+                qmin_pi=qmin_pi, q_batch=q_batch, belief_stats=belief_stats, is_batch_rl=is_batch_rl
             )
 
         self._global_step += 1
