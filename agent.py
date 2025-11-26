@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, MISSING, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, get_args, get_origin, Union
+import logging
 
 # --- Import your IPC wrapper (project root = one level up) ---
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -26,6 +27,21 @@ from util.ipc import ipc_control  # noqa: E402
 from util.control_cmd import ControlCmd, _json_default  # noqa: E402
 from util.trace_collec import trace_filter, flatten_leaves, create_obs
 from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY
+
+# -------------------------
+# Logger
+# -------------------------
+import os
+os.makedirs("logs", exist_ok=True)
+
+# Configure logging to file
+logging.basicConfig(
+    filename="logs/error.log",       # log file path
+    filemode="a",                    # append mode
+    level=logging.INFO,              # log level threshold
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
 
 # -------------------------
 # Utilities
@@ -134,7 +150,7 @@ def ipc_get_statistics(ctrl: ipc_control,
             time.sleep(delay)
             if first_ok_stats_t is not None:
                 elapsed = time.time() - first_ok_stats_t
-                print(elapsed, delay, duration)
+                logging.info(elapsed, delay, duration)
                 if elapsed + delay > duration:
                     return None
             delay *= 1.6
@@ -156,7 +172,7 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
 
     # Build policy with knowledge of ControlCmd structure
     action_dim = policy.action_dim
-    print(f"[INFO] Inferred action dimension from ControlCmd: {action_dim}")
+    logging.info(f"[INFO] Inferred action dimension from ControlCmd: {action_dim}")
 
     ctrl = ipc_control(cfg.server_ip, cfg.server_port, cfg.local_port, link_name="agent")
 
@@ -164,8 +180,8 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
     # Duration control
     first_ok_stats_t: Optional[float] = None
     with open(jsonl_path, "w", encoding="utf-8") as jf:
-        print(f"[INFO] Agent started. Logging to {cfg.out_dir}")
         next_time = time.monotonic()
+        logging.info(f"[INFO] Agent started. Logging to {cfg.out_dir}")
 
         # Keep iteration counting for logs, but duration can stop earlier
         for it in range(cfg.iterations):
@@ -178,16 +194,16 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
             # Start duration timer at first successful stats
             if not timed_out and first_ok_stats_t is None:
                 first_ok_stats_t = time.time()
-                print(first_ok_stats_t)
+                logging.info(first_ok_stats_t)
                 if cfg.duration is not None:
-                    print(f"[INFO] Duration timer started at t={first_ok_stats_t:.3f} "
+                    logging.info(f"[INFO] Duration timer started at t={first_ok_stats_t:.3f} "
                           f"(max {cfg.duration:.3f}s).")
 
             # Enforce duration *immediately after* stats collection (higher priority than iterations)
             if cfg.duration is not None and first_ok_stats_t is not None:
                 elapsed = time.time() - first_ok_stats_t
                 if elapsed >= cfg.duration:
-                    print(f"[INFO] Duration reached: elapsed={elapsed:.3f}s ≥ {cfg.duration:.3f}s. "
+                    logging.info(f"[INFO] Duration reached: elapsed={elapsed:.3f}s ≥ {cfg.duration:.3f}s. "
                           f"Stopping before sending further actions.")
                     break
             
@@ -203,7 +219,7 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
             try:
                 res, control_cmd = policy.act(obs_for_policy, is_eval)
             except Exception as e:
-                print(e)
+                logging.error(f"[ERROR] Failed to build ControlCmd for {e}", exc_info=True)
                 continue
                 
             # Build ControlCmd using canonical mapping (pads/trims internally)
@@ -213,14 +229,14 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
                 try:
                     control_body[link] = control_cmd
                 except (TypeError, ValueError) as e:
-                    print(f"[ERROR] Failed to build ControlCmd for {link}: {e}", file=sys.stderr)
+                    logging.error(f"[ERROR] Failed to build ControlCmd for {link}: {e}", exc_info=True)
 
             # 3) Transmit control
             try:
                 if control_body:
                     ctrl.control(control_body)
             except OSError as e:
-                print(f"[WARN] send control failed: {e}", file=sys.stderr)
+                logging.warning(f"[WARN] send control failed: {e}", file=sys.stderr)
 
             # 4) store previous action
             last_action = res['action']
@@ -251,7 +267,7 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
         ctrl.release()
     except Exception:
         pass
-    print("[INFO] Agent stopped gracefully.")
+    logging.info("[INFO] Agent stopped gracefully.")
 
 def parse_args() -> Tuple[AgentConfig, PolicyBase]:
     p = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
@@ -298,11 +314,11 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
         policy_load_path = policy_cp_path / policy_load_path
         
     if policy_load_path:
-        print(f"PPO Load {policy_load_path}")
+        logging.info(f"PPO Load {policy_load_path}")
         try:
             policy.load(policy_load_path, device=policy_cfg['device'])
         except:
-            print("Load fail; Fall back to no model")
+            logging.error("Load fail; Fall back to no model", exc_info=True)
     return cfg, policy, control_config, args.eval
     
 def main():
@@ -310,9 +326,9 @@ def main():
         cfg, policy, control_config, is_eval = parse_args()
         run_agent(cfg, policy, control_config, is_eval)
     except GracefulExit:
-        print("\n[INFO] Caught interrupt, exiting.")
+        logging.info("\n[INFO] Caught interrupt, exiting.")
     except KeyboardInterrupt:
-        print("\n[INFO] KeyboardInterrupt, exiting.")
+        logging.info("\n[INFO] KeyboardInterrupt, exiting.")
 
 
 if __name__ == "__main__":
