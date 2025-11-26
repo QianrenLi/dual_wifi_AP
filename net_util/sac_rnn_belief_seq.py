@@ -195,7 +195,7 @@ class SACRNNBeliefSeq(PolicyBase):
 
     def _critic_loss(
         self,
-        feat_TBH: Tensor, act_TBA: Tensor, nxt_TBD: Tensor, rew_TB1: Tensor, done_TB1: Tensor, importance_weights: Tensor,
+        feat_TBH: Tensor, act_TBA: Tensor, nxt_TBD: Tensor, rew_TB1: Tensor, done_TB1: Tensor, importance_weights: Tensor, b_h: Tensor | None = None, f_h: Tensor | None = None
     ) -> Tuple[Tensor, Tensor, Dict[str, Tensor] | None]:
         """Returns: c_loss, c_loss_batch, cdl_stats"""
 
@@ -205,6 +205,8 @@ class SACRNNBeliefSeq(PolicyBase):
             done_TB1,
             self.cfg.gamma,
             self._alpha(),
+            b_h,
+            f_h
         )
         q1_TB1, q2_TB1 = self.net.critic_compute(feat_TBH, act_TBA)     # [T,B,1]
 
@@ -212,7 +214,7 @@ class SACRNNBeliefSeq(PolicyBase):
 
         c_loss_batch = diff.pow(2).mean(dim=(0, 1, 3))                  # [B]
         
-        c_loss = (c_loss_batch * importance_weights).mean()
+        c_loss = (c_loss_batch * importance_weights).sum() / (importance_weights.sum() + 1e-8)
 
         cdl_stats = None
         
@@ -284,49 +286,67 @@ class SACRNNBeliefSeq(PolicyBase):
         
         is_trained = False
         # --- Main Batch Loop ---
-        for batch in self.buf.get_sequences(self.cfg.batch_size, trace_length=100, device=self.device):
-            is_trained = True
-            obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = batch
-            importance_weights:Tensor = info["is_weights"].squeeze(-1) # [B]
-            interference:Tensor = info["interference"].squeeze(-1) # [B]
-            
-            ## Belief
-            z_BH, _, mu_BH, logvar_BH = self.net.belief_encode( obs_TBD )
-            y_hat_B1 = self.net.belief_decode( z_BH )
-            b_loss, belief_stats = self._belief_loss( y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch )
-            self._step_with_clip( self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=50.0 )
-            
-            
-            ## Alpha & Critic & Actor
-            z_BH, _, _, _ = self.net.belief_encode( obs_TBD )
-            feat_TBH, _ = self.net.feature_compute( obs_TBD, z_BH.detach() )
-            a_pi_TBA, logp_TB1 = self.net.action_compute( feat_TBH )
-            
-            # Alpha update
-            if self.alpha_opt is not None:
-                ent_loss = self._alpha_loss(logp_TB1)
-                self._step_with_clip( [self.log_alpha], self.alpha_opt, ent_loss, clip_norm=None ) # type: ignore
-            
-            # Critic update
-            c_loss, c_loss_batch, cdl_stats = self._critic_loss(
-                feat_TBH.detach(), act_TBA, nxt_TBD, rew_TB1, done_TB1, importance_weights
+        burn_in = 50
+
+        # 1. Get longer sequence
+        obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = next(self.buf.get_sequences(self.cfg.batch_size, trace_length=100))
+
+        # Split data
+        obs_burn = obs_TBD[:burn_in]
+        obs_train = obs_TBD[burn_in:]
+        act_train = act_TBA[burn_in:]
+        rew_train = rew_TB1[burn_in:]
+        nxt_train = nxt_TBD[burn_in:]
+        done_train = done_TB1[burn_in:]
+
+        # 2. Burn-in Phase (No Grads)
+        with th.no_grad():
+            # Start with zero state
+            z_burn, h_burn, _, _ = self.net.belief_encode(obs_burn) 
+            _, f_h_burn = self.net.feature_compute( obs_burn, z_burn.detach() )
+
+        is_trained = True
+        importance_weights:Tensor = info["is_weights"].squeeze(-1) # [B]
+        interference:Tensor = info["interference"].squeeze(-1) # [B]
+        
+        ## Belief
+        z_BH, _, mu_BH, logvar_BH = self.net.belief_encode(obs_train, b_h=h_burn)
+        y_hat_B1 = self.net.belief_decode( z_BH )
+        
+        b_loss, belief_stats = self._belief_loss( y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch )
+        self._step_with_clip( self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=50.0 )
+        
+        
+        ## Alpha & Critic & Actor
+        z_BH, _, _, _ = self.net.belief_encode( obs_train, b_h=h_burn )
+        feat_TBH, _ = self.net.feature_compute( obs_train, z_BH.detach(), f_h_burn)
+        a_pi_TBA, logp_TB1 = self.net.action_compute( feat_TBH )
+        
+        # Alpha update
+        if self.alpha_opt is not None:
+            ent_loss = self._alpha_loss(logp_TB1)
+            self._step_with_clip( [self.log_alpha], self.alpha_opt, ent_loss, clip_norm=None ) # type: ignore
+        
+        # Critic update
+        c_loss, c_loss_batch, cdl_stats = self._critic_loss(
+            feat_TBH.detach(), act_train, nxt_train, rew_train, done_train, importance_weights, b_h=h_burn, f_h=f_h_burn
+        )
+        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=100.0)
+        self.net.soft_sync(self.cfg.tau)
+
+        # Actor update
+        a_loss, qmin_pi = self._actor_loss(feat_TBH, a_pi_TBA, logp_TB1)
+        self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=50.0)
+
+        # Logging
+        if self._global_step % self.cfg.log_interval == 0:
+            self._log_batch_stats(writer, self._global_step, 
+                a_loss=a_loss, c_loss=c_loss, b_loss=b_loss, ent_loss=ent_loss, logp_TB1=logp_TB1, 
+                qmin_pi=qmin_pi, cdl_stats=cdl_stats, belief_stats=belief_stats, is_batch_rl=is_batch_rl
             )
-            self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=100.0)
-            self.net.soft_sync(self.cfg.tau)
 
-            # Actor update
-            a_loss, qmin_pi = self._actor_loss(feat_TBH, a_pi_TBA, logp_TB1)
-            self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=50.0)
-
-            # Logging
-            if self._global_step % self.cfg.log_interval == 0:
-                self._log_batch_stats(writer, self._global_step, 
-                    a_loss=a_loss, c_loss=c_loss, b_loss=b_loss, ent_loss=ent_loss, logp_TB1=logp_TB1, 
-                    qmin_pi=qmin_pi, cdl_stats=cdl_stats, belief_stats=belief_stats, is_batch_rl=is_batch_rl
-                )
-
-            self._global_step += 1
-            self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.cpu().numpy()) # type: ignore
+        self._global_step += 1
+        self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.cpu().numpy()) # type: ignore
 
         if local_writer: writer.flush(); writer.close()
         return is_trained

@@ -60,7 +60,7 @@ def _tracify(states, actions, rewards, network_output, reward_agg):
     # Handle next_obs/done array creation
     next_obs_np = np.vstack([obs_np[1:], np.zeros((1, obs_np.shape[1]), np.float32)]) if T>0 else np.zeros((1, obs_np.shape[1]), np.float32)
     done_np = np.array([float(network_output[t].get("done",0)) for t in range(T)], dtype=np.float32)
-    if T > 0: done_np[-1] = 1.0
+    # if T > 0: done_np[-1] = 1.0
     
     return obs_np, act_np, rew_np, next_obs_np, done_np
 
@@ -97,10 +97,6 @@ class Episode:
     @property
     def length(self): return self.data_num
 
-    def start_point(self, T: int) -> int:
-        L = max(0, self.data_num - T)
-        return 0 if L <= 0 else np.random.randint(0, L)
-
 # ---------------- rank-based PER with array-based binary heap ----------------
 @register_buffer
 class RNNPriReplayEqualEp:
@@ -118,7 +114,7 @@ class RNNPriReplayEqualEp:
                  beta0: float = 0.4,     # IS exponent (you can anneal toward 1.0)
                  rebalance_interval: int = 2000,   # infrequent sort+rebuild
                  writer=None,
-                 episode_length: int = 100):
+                 episode_length: int = 300):
         self.device = th.device(device)
         self.capacity = int(capacity)
         self.gamma = float(gamma)
@@ -215,11 +211,11 @@ class RNNPriReplayEqualEp:
     # ---------------- construction / add / extend ----------------
     @staticmethod
     def build_from_traces(traces, device="cuda", reward_agg="sum", capacity=10000,
-                          init_loss: Optional[float] = None, episode_length=100, **kwargs):
+                          init_loss: Optional[float] = None, episode_length=600, **kwargs):
         buf = RNNPriReplayEqualEp(
             device=device, capacity=capacity, gamma=kwargs.get("gamma", 0.99),
             alpha=kwargs.get("alpha", 0.7), beta0=kwargs.get("beta0", 0.4),
-            rebalance_interval=kwargs.get("rebalance_interval", 2000),
+            rebalance_interval=kwargs.get("rebalance_interval", 100),
             writer=kwargs.get("writer", None),
             episode_length=episode_length  # Passing episode_length
         )
@@ -245,7 +241,7 @@ class RNNPriReplayEqualEp:
             
             ep = Episode(
                 obs_np[start:end], act_np[start:end], rew_np[start:end], next_obs_np[start:end], done_np[start:end],
-                init_loss=100.0 if init_loss is None else float(init_loss),
+                init_loss=10000.0 if init_loss is None else float(init_loss),
                 gamma=self.gamma,
                 interference=interference
             )
@@ -274,6 +270,14 @@ class RNNPriReplayEqualEp:
                 self._evict_leaf()
             self._rebalance_if_needed()
 
+    def update_episode_losses(self, ep_ids: List[int], losses: Iterable[float]):
+        for eid, new_loss in zip(ep_ids, losses):
+            if 0 <= eid < len(self.heap):
+                self._update_key(eid, float(new_loss))
+            else:
+                raise IndexError(f"Episode ID {eid} out of range for replay buffer of size {len(self.heap)}")
+        self._rebalance_if_needed(just_updated=len(ep_ids))
+    
     # ---------------- sampling ----------------
     def _approx_rank_probs(self):
         N = len(self.heap)
@@ -290,77 +294,107 @@ class RNNPriReplayEqualEp:
         if probs is None: return [], None
         chosen = np.random.choice(np.arange(N), size=batch_size, replace=True, p=probs)
         return chosen.tolist(), probs
-    
-    def _gather_batch(self, ep_ids: List[int], starts: List[int], T: int):
+
+    def _calc_is_weights(
+        self,
+        probs_ep: np.ndarray,
+        beta: Optional[float] = None,
+        device: Optional[th.device | str] = None,
+    ) -> th.Tensor:
         """
-        IMPROVEMENT: Efficiently gathers batch data using NumPy array pre-allocation 
-        and slicing before a single PyTorch conversion.
+        Compute importance-sampling weights from the per-sampled-episode probs.
+        probs_ep: shape [B], probabilities of the sampled episodes.
+        """
+        if beta is None:
+            beta = self.beta
+        N = len(self.heap)
+        p = np.maximum(1e-12, probs_ep)
+        wi = np.power(N * p, -float(beta))
+        wi /= wi.max() if wi.size > 0 else 1.0
+        w_t = th.from_numpy(wi.astype(np.float32))
+        if device is not None:
+            w_t = w_t.to(device, non_blocking=True)
+        return w_t.unsqueeze(-1)
+    
+    def _gather_batch(
+        self,
+        ep_ids: List[int],
+        T: int,
+        device: Optional[th.device | str] = None,
+    ):
+        """
+        Directly assemble batch from episode arrays using np.stack.
+        Assumes each episode has length >= T and same length.
+        Returns tensors on `device`.
         """
         if not ep_ids:
             return None, None, None, None, None, None
-            
-        B = len(ep_ids)
-        ep0 = self.heap[ep_ids[0]]
-        obs_shape = ep0.obs_np.shape[1]
-        act_shape = ep0.actions_np.shape[1]
 
-        # 1. Pre-allocate large NumPy arrays (T, B, dim)
-        obs_TB = np.zeros((T, B, obs_shape), dtype=np.float32)
-        act_TB = np.zeros((T, B, act_shape), dtype=np.float32)
-        rew_TB = np.zeros((T, B, 1), dtype=np.float32)
-        nxt_TB = np.zeros((T, B, obs_shape), dtype=np.float32)
-        done_TB = np.zeros((T, B, 1), dtype=np.float32)
-        interfs = np.zeros(B, dtype=np.float32)
-
-        # 2. Loop and slice/copy data into pre-allocated arrays
-        for i, (eid, s) in enumerate(zip(ep_ids, starts)):
-            ep = self.heap[eid]
-            e = s + T
-            
-            # Use direct indexing (NumPy slices)
-            obs_TB[:, i] = ep.obs_np[s:e]
-            act_TB[:, i] = ep.actions_np[s:e]
-            # Reshape 1D reward/done arrays for 3D batch array
-            rew_TB[:, i, 0] = ep.rewards_np[s:e]
-            nxt_TB[:, i] = ep.next_obs_np[s:e]
-            done_TB[:, i, 0] = ep.dones_np[s:e]
-            interfs[i] = ep.interference
-
-        # 3. Convert all arrays to PyTorch Tensors on the target device simultaneously
-        obs_TB   = th.from_numpy(obs_TB).to(self.device)
-        act_TB   = th.from_numpy(act_TB).to(self.device)
-        rew_TB   = th.from_numpy(rew_TB).to(self.device)
-        nxt_TB   = th.from_numpy(nxt_TB).to(self.device)
-        done_TB  = th.from_numpy(done_TB).to(self.device)
-        interf_B = th.from_numpy(interfs).to(self.device).unsqueeze(-1)
-        
-        return obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B
-
-    def _calc_is_weights(self, ep_ids: List[int], probs: np.ndarray, beta: Optional[float] = None):
-        if beta is None: beta = self.beta
-        N = len(self.heap)
-        p = probs[np.asarray(ep_ids, dtype=np.int64)]
-        wi = np.power(N * np.maximum(1e-12, p), -float(beta))
-        wi /= wi.max() if wi.size > 0 else 1.0
-        return th.tensor(wi, dtype=th.float32).unsqueeze(-1)
-    
-    def get_minibatches(self, batch_size: int, trace_length: int = 100, device: Optional[th.device|str] = None):
-        if not self.heap: return
-        
         dev = th.device(device) if device is not None else self.device
+
+        # Grab all episodes once
+        eps = [self.heap[eid] for eid in ep_ids]
+        B = len(eps)
+
+        # ---- Direct stacking along batch axis (axis=1 gives [T, B, ·]) ----
+        obs_TB   = np.stack([ep.obs_np[:T]     for ep in eps], axis=1)            # (T, B, obs_dim)
+        act_TB   = np.stack([ep.actions_np[:T] for ep in eps], axis=1)            # (T, B, act_dim)
+        rew_TB   = np.stack([ep.rewards_np[:T] for ep in eps], axis=1)[..., None] # (T, B, 1)
+        nxt_TB   = np.stack([ep.next_obs_np[:T] for ep in eps], axis=1)           # (T, B, obs_dim)
+        done_TB  = np.stack([ep.dones_np[:T]    for ep in eps], axis=1)[..., None]# (T, B, 1)
+        interfs  = np.array([ep.interference    for ep in eps], dtype=np.float32) # (B,)
+
+        # ---- Single NumPy -> Torch hop per array ----
+        obs_TB_t   = th.from_numpy(obs_TB).to(dev, non_blocking=True)
+        act_TB_t   = th.from_numpy(act_TB).to(dev, non_blocking=True)
+        rew_TB_t   = th.from_numpy(rew_TB).to(dev, non_blocking=True)
+        nxt_TB_t   = th.from_numpy(nxt_TB).to(dev, non_blocking=True)
+        done_TB_t  = th.from_numpy(done_TB).to(dev, non_blocking=True)
+        interf_B_t = th.from_numpy(interfs).to(dev, non_blocking=True).unsqueeze(-1)
+
+        return obs_TB_t, act_TB_t, rew_TB_t, nxt_TB_t, done_TB_t, interf_B_t
+
+    def get_sequences(
+        self,
+        batch_size: int,
+        device: Optional[th.device | str] = None,
+        *args,
+        **kwargs,
+    ):
+        if not self.heap:
+            return
+
+        dev = th.device(device) if device is not None else self.device
+
+        ep_ids, probs_all = self._choose_episode_ids(batch_size)
+        if not ep_ids:
+            return
+
+        idxs = np.asarray(ep_ids, dtype=np.int64)
+        probs_ep = probs_all[idxs]  # [B]
+
+        obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(
+            ep_ids, self.episode_length, device=dev
+        )
+
+        is_w_B1 = self._calc_is_weights(probs_ep, device=dev)
+        prob_B1 = th.from_numpy(probs_ep.astype(np.float32)).to(
+            dev, non_blocking=True
+        ).unsqueeze(-1)
+
+        info = {
+            "ep_ids": ep_ids,
+            "interference": interf_B,
+            "is_weights": is_w_B1,
+            "probs": prob_B1,
+        }
+        yield (obs_TB, act_TB, rew_TB, nxt_TB, done_TB, info)
+
         
+    
+    # You can use the below method to sample from the replay buffer
+    def sample(self, batch_size: int):
+        """Sample a batch of episodes with uniform priority sampling."""
         ep_ids, probs = self._choose_episode_ids(batch_size)
-        
-        # No start points needed since every episode is of the same length
-        starts = [0] * len(ep_ids)
-        
-        # _gather_batch now returns tensors already on self.device (cuda or cpu)
-        obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(ep_ids, starts, trace_length)
-
-        is_w_B1 = self._calc_is_weights(ep_ids, probs).to(dev)
-        prob_B1 = th.tensor(probs[np.asarray(ep_ids)], dtype=th.float32).unsqueeze(-1).to(dev)
-
-        info = {"ep_ids": ep_ids, "interference": interf_B, "is_weights": is_w_B1, "probs": prob_B1}
-        T = trace_length
-        for t in range(T):
-            yield (obs_TB[t], act_TB[t], rew_TB[t], nxt_TB[t], done_TB[t], info)
+        starts = [0] * len(ep_ids)  # No need for start points in this version
+        return self._gather_batch(ep_ids, starts, self.episode_length)

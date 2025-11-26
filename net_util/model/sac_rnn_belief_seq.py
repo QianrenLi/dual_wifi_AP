@@ -67,8 +67,35 @@ class Network(nn.Module):
         self.logstd_head        = nn.Linear(hidden, act_dim)
         # self.logstd_head        = nn.Parameter(th.full((act_dim,), init_log_std))
 
+        self._init_weights(init_log_std)
+        
         self._hard_sync()
         self.scale_log_offset = scale_log_offset
+
+    def _init_weights(self, init_log_std: float):
+        gain = nn.init.calculate_gain("relu")  # good for GELU/ReLU-like nets
+
+        def _orthogonal_init(m: nn.Module):
+            # Linear layers
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=gain)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+            # GRU: orthogonal for both input->hidden and hidden->hidden weights
+            elif isinstance(m, nn.GRU):
+                for name, param in m.named_parameters():
+                    if "weight_ih" in name or "weight_hh" in name:
+                        nn.init.orthogonal_(param.data, gain=gain)
+                    elif "bias" in name:
+                        nn.init.zeros_(param.data)
+
+        # Apply to all submodules (FeatureExtractorGRU included)
+        self.apply(_orthogonal_init)
+
+        # Special: initialize log-std head bias to given value
+        if self.logstd_head.bias is not None:
+            self.logstd_head.bias.data.fill_(init_log_std)
 
     def _hard_sync(self):
         for t, s in zip(self.q1_t.parameters(), self.q1.parameters()): t.data.copy_(s.data)
@@ -96,9 +123,9 @@ class Network(nn.Module):
 
         # reparameterize
         if is_evaluate:
-            z_BH = th.distributions.Normal(mu_BH, (logvar_BH / 2).exp(), validate_args=False).mode()
+            z_BH = th.distributions.Normal(mu_BH, (logvar_BH / 2).exp()).mode
         else:
-            z_BH = th.distributions.Normal(mu_BH, (logvar_BH / 2).exp(), validate_args=False).rsample()
+            z_BH = th.distributions.Normal(mu_BH, (logvar_BH / 2).exp()).rsample()
         return z_BH, b_h_next, mu_BH, logvar_BH
     
     def belief_decode(self, z_BH: th.Tensor) -> th.Tensor:
@@ -114,10 +141,10 @@ class Network(nn.Module):
         # std = th.clamp(self.logstd_head, self.log_std_min, self.log_std_max).exp()
         std = th.clamp(self.logstd_head(feat), self.log_std_min, self.log_std_max).exp()
         
-        dist = th.distributions.Normal(mean_action, std, validate_args=False)
+        dist = th.distributions.Normal(mean_action, std)
         
         if is_evaluate:
-            u = dist.mode()
+            u = dist.mode
         else:
             u = dist.rsample()
         
@@ -138,14 +165,16 @@ class Network(nn.Module):
         r_TB1: th.Tensor, 
         d_TB1: th.Tensor, 
         gamma: float, 
-        alpha: th.Tensor
+        alpha: th.Tensor,
+        b_h: Optional[th.Tensor] = None,
+        f_h: Optional[th.Tensor] = None
     ) ->  Tuple[th.Tensor, th.Tensor]:
         # 2) Encode the next sequence with target encoder from zero state
-        z_TBH, _, _, _ = self.belief_encode(nxt_TBD)
+        z_TBH, _, _, _ = self.belief_encode(nxt_TBD, b_h, is_evaluate=True)
         
-        feat_TBH, _ = self.fe_t.encode(th.cat([nxt_TBD, z_TBH], dim=-1))   # [T,B,H]
+        feat_TBH, _ = self.fe_t.encode(th.cat([nxt_TBD, z_TBH], dim=-1), f_h)   # [T,B,H]
 
-        a_TBA, logp_TB1 = self.action_compute(feat_TBH)
+        a_TBA, logp_TB1 = self.action_compute(feat_TBH, is_evaluate=True)  # [T,B,A], [T,B,1]
 
         qmin = th.min(
             self.q1_t(th.cat([feat_TBH, a_TBA], dim=-1)),
