@@ -118,14 +118,16 @@ class Network(nn.Module):
     def belief_encode(self, obs: th.Tensor, b_h: th.Tensor = None, is_evaluate = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         feat, b_h_next   = self.belief_encoder_gru.encode(obs, b_h)
         mu_v             = self.belief_encoder_mu(feat)
-        logvar           = self.belief_encoder_var(feat)
+        logstd           = self.belief_encoder_var(feat)
 
         # reparameterize
+        dist = th.distributions.Normal(mu_v, logstd.exp())
         if is_evaluate:
-            latent = th.distributions.Normal(mu_v, (logvar / 2).exp()).mode
+            latent = dist.mode
         else:
-            latent = th.distributions.Normal(mu_v, (logvar / 2).exp()).rsample()
-        return latent, b_h_next, mu_v, logvar
+            latent = dist.rsample()
+            
+        return latent, b_h_next, mu_v, logstd * 2
     
     def belief_decode(self, latent: th.Tensor) -> th.Tensor:
         return self.belief_decoder(latent)                 # [B, 1]

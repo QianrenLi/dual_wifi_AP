@@ -70,7 +70,7 @@ class SACRNNBeliefSeqDist_Config:
     cdl_beta_cql_multiplier: float = 5 * 20 
 
     # Internal state helper for annealing beta
-    annealing_max_lb: float = 0.2
+    annealing_max_lb: float = 100
     annealing_epoch_max: float = 100
 
 
@@ -201,12 +201,11 @@ class SACRNNBeliefSeqDist(PolicyBase):
         
         mse_loss = (y_hat_TB1 - interf_B1).pow(2).mean()
         
-        # kl_loss = 0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0).mean()
+        kl_loss = 0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0).mean()
 
-        # beta = self._get_beta(epoch)
-        # b_loss = mse_loss + beta * kl_loss
+        beta = self._get_beta(epoch)
+        b_loss = mse_loss + beta * kl_loss
         
-        b_loss = mse_loss
 
         stats = {
             # "loss/KL": kl_loss.item(),
@@ -251,7 +250,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
         alpha = self._alpha()
         q1_pi = self.net.critic_compute(feat_TBH, a_pi_TBA)
         
-        q_val = self.vd.mean_value(q1_pi, 0.01, 0.8)
+        q_val = self.vd.mean_value(q1_pi, 0.1, 0.9)
         a_loss = (alpha * logp_TB1 - q_val).mean()
         return a_loss, q_val
 
@@ -349,7 +348,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
 
         # 4) Critic Q-values on dataset actions
         q_TB1K = self.net.critic_compute(feat_TBH, act_TBA)         # [T,B,K]
-        q_mean_TB1 = self.vd.mean_value(q_TB1K, 0.01, 0.8)          # [T,B,1] (your current API)
+        q_mean_TB1 = self.vd.mean_value(q_TB1K, 0.1, 0.9)          # [T,B,1] (your current API)
         scalar = -q_mean_TB1.mean()                                 # maximize Q -> minimize -Q
 
         scalar.backward()
