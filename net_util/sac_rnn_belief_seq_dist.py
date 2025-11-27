@@ -159,7 +159,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
         writer.add_scalar("loss/actor", kwargs['a_loss'].item(), step)
         writer.add_scalar("loss/critic", kwargs['c_loss'].item(), step)
         writer.add_scalar("loss/belief", kwargs['b_loss'].item(), step)
-        writer.add_scalar("loss/KL", kwargs['belief_stats']['loss/KL'], step)
+        # writer.add_scalar("loss/KL", kwargs['belief_stats']['loss/KL'], step)
         
         if self.alpha_opt is not None:
             writer.add_scalar("loss/entropy", kwargs['ent_loss'].item(), step)
@@ -186,6 +186,8 @@ class SACRNNBeliefSeqDist(PolicyBase):
 
             writer.add_figure("q/dist_mean_bar", fig, global_step=step)
             plt.close(fig)
+    
+    
     ## Loss
     def _belief_loss(self, 
         y_hat_TB1: Tensor, 
@@ -199,15 +201,17 @@ class SACRNNBeliefSeqDist(PolicyBase):
         
         mse_loss = (y_hat_TB1 - interf_B1).pow(2).mean()
         
-        kl_loss = 0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0).mean()
+        # kl_loss = 0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0).mean()
 
-        beta = self._get_beta(epoch)
-        b_loss = mse_loss + beta * kl_loss
+        # beta = self._get_beta(epoch)
+        # b_loss = mse_loss + beta * kl_loss
+        
+        b_loss = mse_loss
 
         stats = {
-            "loss/KL": kl_loss.item(),
+            # "loss/KL": kl_loss.item(),
             "loss/MSE": mse_loss.item(),
-            "belief/beta": beta,
+            # "belief/beta": beta,
         }
 
         return b_loss, stats
@@ -247,7 +251,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
         alpha = self._alpha()
         q1_pi = self.net.critic_compute(feat_TBH, a_pi_TBA)
         
-        q_val = self.vd.mean_value(q1_pi, 0.05, 0.95)
+        q_val = self.vd.mean_value(q1_pi, 0.01, 0.8)
         a_loss = (alpha * logp_TB1 - q_val).mean()
         return a_loss, q_val
 
@@ -259,7 +263,165 @@ class SACRNNBeliefSeqDist(PolicyBase):
         # logp is detached to prevent backprop into actor
         return -(self.log_alpha * (logp_TB1.detach() + self.target_entropy)).mean() # type: ignore
 
-    
+    ### Probe
+    @th.no_grad()
+    def _probe_z_ablation_feature(
+        self,
+        obs_TBD: Tensor,
+        h_burn: Tensor,
+        f_h_burn: Tensor,
+        writer: Optional[SummaryWriter],
+        step: int,
+    ) -> None:
+        """
+        Measure importance of z by comparing features with real z vs zeroed z.
+
+        Logs:
+          z_importance/feat_delta_l2     : mean L2 change in feature
+          z_importance/feat_rel_delta   : mean relative change in feature
+        """
+        if writer is None:
+            return
+
+        # 1) Get z from belief encoder (no grad, just a probe)
+        z_BH, _, _, _ = self.net.belief_encode(obs_TBD, b_h=h_burn)
+
+        # 2) Features with real z
+        feat_full_TBH, _ = self.net.feature_compute(obs_TBD, z_BH, f_h_burn)  # [T,B,H]
+
+        # 3) Features with zeroed z
+        z_zero_BH = th.zeros_like(z_BH)
+        feat_noz_TBH, _ = self.net.feature_compute(obs_TBD, z_zero_BH, f_h_burn)
+
+        # 4) L2 distance in feature space as "impact" of z
+        delta_TBH = feat_full_TBH - feat_noz_TBH                   # [T,B,H]
+        imp_TB = delta_TBH.pow(2).sum(dim=-1).sqrt()               # [T,B]
+        imp_scalar = imp_TB.mean().item()
+
+        # Relative importance (normalized by feature norm)
+        feat_norm_TB = feat_full_TBH.norm(dim=-1) + 1e-8           # [T,B]
+        rel_imp_TB = (imp_TB / feat_norm_TB).mean().item()
+
+        writer.add_scalar("z_importance/feat_delta_l2", imp_scalar, step)
+        writer.add_scalar("z_importance/feat_rel_delta", rel_imp_TB, step)
+
+        # Optional histogram for inspection
+        writer.add_histogram("z_importance/feat_delta_l2_hist",
+                             imp_TB.detach().cpu().view(-1), step)
+
+    def _probe_z_gradient_importance(
+        self,
+        obs_TBD: Tensor,
+        act_TBA: Tensor,
+        h_burn: Tensor,
+        f_h_burn: Tensor,
+        writer: Optional[SummaryWriter],
+        step: int,
+    ) -> None:
+        """
+        Gradient-based importance: how sensitive the mean Q is to obs vs z.
+
+        We:
+          - compute z from belief_encode (no grad)
+          - treat obs and z as independent inputs to feature_compute with grad
+          - compute mean Q under dataset actions
+          - backprop to get ∂Q/∂obs and ∂Q/∂z
+        Logs:
+          z_importance/grad_norm_obs
+          z_importance/grad_norm_z
+          z_importance/grad_ratio_z   (z / (obs+z))
+        """
+        if writer is None:
+            return
+
+        self.net.zero_grad(set_to_none=True)
+
+        # 1) Get z from belief encoder (no grad to avoid touching belief net)
+        with th.no_grad():
+            z_BH_raw, _, _, _ = self.net.belief_encode(obs_TBD, b_h=h_burn)
+
+        # 2) Inputs for feature_compute with grad
+        obs_feat = obs_TBD.detach().clone().requires_grad_(True)    # [T,B,D_obs]
+        z_BH = z_BH_raw.detach().clone().requires_grad_(True)       # [B,H_latent] or compatible
+
+        # 3) Features from obs & z
+        feat_TBH, _ = self.net.feature_compute(obs_feat, z_BH, f_h_burn)
+
+        # 4) Critic Q-values on dataset actions
+        q_TB1K = self.net.critic_compute(feat_TBH, act_TBA)         # [T,B,K]
+        q_mean_TB1 = self.vd.mean_value(q_TB1K, 0.01, 0.8)          # [T,B,1] (your current API)
+        scalar = -q_mean_TB1.mean()                                 # maximize Q -> minimize -Q
+
+        scalar.backward()
+
+        grad_obs_TBD = obs_feat.grad                                # [T,B,D_obs]
+        grad_z_BH    = z_BH.grad                                    # [B,H_latent or ...]
+
+        # If z is [B,H], broadcast it over T for a comparable norm
+        if grad_z_BH is not None:
+            grad_z_TBH = grad_z_BH
+            grad_z_norm = grad_z_TBH.norm(dim=-1).mean().item()     # scalar
+        else:
+            grad_z_norm = 0.0
+
+        grad_obs_norm = grad_obs_TBD.norm(dim=-1).mean().item()     # scalar
+
+        ratio = grad_z_norm / (grad_z_norm + grad_obs_norm + 1e-8)
+
+        writer.add_scalar("z_importance/grad_norm_obs", grad_obs_norm, step)
+        writer.add_scalar("z_importance/grad_norm_z",   grad_z_norm,   step)
+        writer.add_scalar("z_importance/grad_ratio_z",  ratio,         step)
+        
+        self.net.zero_grad(set_to_none=True)
+
+    @th.no_grad()
+    def _probe_z_weight_importance(
+        self,
+        writer: Optional[SummaryWriter],
+        step: int,
+    ) -> None:
+        """
+        Inspect first layer of feature extractor to see how much weight is on z vs obs.
+
+        Assumes:
+          self.net.fe.mlp[0] is nn.Linear with input dim = obs_dim + belief_dim
+
+        Logs:
+          z_importance/weight_norm_obs
+          z_importance/weight_norm_z
+          z_importance/weight_ratio_z   (z / (obs+z))
+        """
+        if writer is None:
+            return
+
+        fe = getattr(self.net, "fe", None)
+        if fe is None or not hasattr(fe, "mlp"):
+            return
+
+        first = fe.mlp[0]
+        if not isinstance(first, th.nn.Linear):
+            return
+
+        W = first.weight.data       # [H_out, D_in = obs_dim + belief_dim]
+
+        obs_dim = int(self.cfg.obs_dim)
+        z_dim   = int(self.cfg.belief_dim)
+        if W.shape[1] < obs_dim + z_dim:
+            # Safety check: unexpected shape, don't crash
+            return
+
+        W_obs = W[:, :obs_dim]
+        W_z   = W[:, obs_dim:obs_dim + z_dim]
+
+        norm_obs = W_obs.norm().item()
+        norm_z   = W_z.norm().item()
+        ratio    = norm_z / (norm_z + norm_obs + 1e-8)
+
+        writer.add_scalar("z_importance/weight_norm_obs", norm_obs, step)
+        writer.add_scalar("z_importance/weight_norm_z",   norm_z,   step)
+        writer.add_scalar("z_importance/weight_ratio_z",  ratio,    step)
+
+    ## Train
     def train_per_epoch(
         self,
         epoch: int,
@@ -338,6 +500,11 @@ class SACRNNBeliefSeqDist(PolicyBase):
                 a_loss=a_loss, c_loss=c_loss, b_loss=b_loss, ent_loss=ent_loss, logp_TB1=logp_TB1, 
                 qmin_pi=qmin_pi, q_batch=q_batch, belief_stats=belief_stats, is_batch_rl=is_batch_rl
             )
+            
+        if self._global_step % (self.cfg.log_interval * 10) == 0:
+            self._probe_z_ablation_feature(obs_train, h_burn, f_h_burn, writer, self._global_step)
+            self._probe_z_gradient_importance(obs_train, act_train, h_burn, f_h_burn, writer, self._global_step)
+            self._probe_z_weight_importance(writer, self._global_step)
 
         self._global_step += 1
         self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.cpu().numpy()) # type: ignore
