@@ -1,5 +1,5 @@
-from typing import List
 import torch as th
+import numpy as np
 from util.trace_collec import _apply_rule
 
 class ValueDistribution:
@@ -139,26 +139,90 @@ class ValueDistribution:
     
     
     # --------- public API --------- #
-    def mean_value(self, value_distribution):
+    def mean_value(
+        self,
+        value_distribution,
+        q_low: float | None = None,
+        q_high: float | None = None,
+    ):
         """
         If value_distribution is:
         - torch.Tensor with shape (..., bins) -> returns tensor with shape (..., 1)
         - list/np array of length bins       -> returns float
+
+        If q_low, q_high are given (e.g. 0.05, 0.95), compute the mean value
+        restricted to the quantile interval [q_low, q_high] (approximate by
+        slicing the CDF along the bin axis).
         """
+        # --------- torch path --------- #
         if isinstance(value_distribution, th.Tensor):
-            # value_distribution: [..., K], K == self.bins
+            probs = value_distribution
+            # v: [K]
             v = self._value_bins_tensor(
-                device=value_distribution.device,
-                dtype=value_distribution.dtype,
-            )  # [K]
-            # broadcast multiply and sum over last dim
-            return (value_distribution * v).sum(dim=-1, keepdim=True)
+                device=probs.device,
+                dtype=probs.dtype,
+            )
+
+            # No quantile restriction -> standard mean
+            if q_low is None or q_high is None or (q_low <= 0.0 and q_high >= 1.0):
+                return (probs * v).sum(dim=-1, keepdim=True)
+
+            # Clamp / sanity
+            assert q_low >= 0.0 and q_high <= 1.0
+            assert q_low < q_high, ValueError(f"q_high ({q_high}) must be > q_low ({q_low}).")
+
+            # CDF along last dim
+            cdf = probs.cumsum(dim=-1)                           # [..., K]
+            prev_cdf = th.cat(
+                [th.zeros_like(cdf[..., :1]), cdf[..., :-1]],
+                dim=-1
+            )                                                    # [..., K]
+
+            start = prev_cdf
+            end   = cdf
+
+            # Length of intersection of [start,end] with [q_low, q_high]
+            left  = end.clamp(max=q_high)                      # min(end, q_high)
+            right = start.clamp(min=q_low)                     # max(start, q_low)
+            seg   = (left - right).clamp(min=0.0)                # [..., K]
+
+            denom = max(q_high - q_low, 1e-8)
+            weights = seg / denom                                # [..., K], sum≈1
+
+            # Conditional mean on that quantile slice
+            return (weights * v).sum(dim=-1, keepdim=True)
+
+        # --------- Python list / numpy path --------- #
         else:
-            # Fallback to Python list / numpy
-            mean_val = 0.0
-            for p, val in zip(value_distribution, self.value_bins):
-                mean_val += p * val
-            return float(mean_val)
+            probs = np.asarray(value_distribution, dtype=np.float64)
+            v = np.asarray(self.value_bins, dtype=np.float64)
+
+            # No quantile restriction -> standard mean
+            if q_low is None or q_high is None or (q_low <= 0.0 and q_high >= 1.0):
+                return float(np.sum(probs * v))
+
+            q_low = float(max(0.0, min(1.0, q_low)))
+            q_high = float(max(0.0, min(1.0, q_high)))
+            if q_high <= q_low:
+                raise ValueError(f"q_high ({q_high}) must be > q_low ({q_low}).")
+
+            # Normalize to be safe
+            probs = probs / (probs.sum() + 1e-12)
+
+            cdf = np.cumsum(probs)                # [K]
+            prev_cdf = np.concatenate(([0.0], cdf[:-1]))
+
+            start = prev_cdf
+            end   = cdf
+
+            left  = np.minimum(end, q_high)
+            right = np.maximum(start, q_low)
+            seg   = np.clip(left - right, 0.0, None)
+
+            denom = max(q_high - q_low, 1e-8)
+            weights = seg / denom
+
+            return float(np.sum(weights * v))
 
     def get_bin_value(self) -> list:
         bin_values = []

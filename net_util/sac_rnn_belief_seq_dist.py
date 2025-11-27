@@ -4,6 +4,7 @@ import numpy as np
 import torch as th
 import torch.nn.functional as F
 import importlib
+import matplotlib.pyplot as plt
 
 # Assuming these are defined elsewhere and necessary
 from net_util.base import PolicyBase
@@ -98,7 +99,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
         # Optimizers (simplified actor LR setup)
         ac_lr = cfg.lr * (0.1 if cfg.batch_rl else 1.0)
         self.actor_opt = th.optim.Adam(self.net.actor_parameters(), lr=ac_lr)
-        self.critic_opt = th.optim.Adam(self.net.critic_parameters(), lr=cfg.lr)
+        self.critic_opt = th.optim.Adam(self.net.critic_parameters(), lr=cfg.lr * 5)
         self.belief_opt = th.optim.Adam(self.net.belief_parameters(), lr=cfg.lr * 5)
         
         # Alpha Setup (consolidated)
@@ -166,16 +167,25 @@ class SACRNNBeliefSeqDist(PolicyBase):
 
         writer.add_scalar("q/qmin_pi", kwargs['qmin_pi'].mean().item(), step)
         writer.add_scalar("policy/logp_pi", kwargs['logp_TB1'].mean().item(), step)
-        # q_key = "q_batch"   # change this to whatever name you actually use
-        # if q_key in kwargs and kwargs[q_key] is not None:
-        #     q_TBK: th.Tensor = kwargs[q_key]              # [T,B,K]
-        #     # Average over time and batch -> [K]
-        #     q_mean_K = q_TBK.mean(dim=(0, 1))             # [K]
+        q_key = "q_batch"   # change this to whatever name you actually use
+        if q_key in kwargs and kwargs[q_key] is not None and self._global_step % (self.cfg.log_interval * 10) == 0:
+            q_TBK: th.Tensor = kwargs[q_key]          # [T, B, K]
+            q_mean_K = q_TBK.mean(dim=(0, 1))           # [K]
+            
+            q_np = q_mean_K.detach().cpu().numpy()      # [K]
+            K = q_np.shape[0]
+            xs = list(range(K))
 
-        #     # Option 1: log as a histogram (quick & compact)
-        #     writer.add_histogram("q/dist_mean", q_mean_K, step)
+            fig, ax = plt.subplots(figsize=(6, 4))
 
+            # --- Option A: bar plot (recommended) ---
+            ax.bar(xs, q_np)
+            ax.set_xlabel("Atom index")
+            ax.set_ylabel("Mean probability")
+            ax.set_title("Mean Q distribution over atoms")
 
+            writer.add_figure("q/dist_mean_bar", fig, global_step=step)
+            plt.close(fig)
     ## Loss
     def _belief_loss(self, 
         y_hat_TB1: Tensor, 
@@ -237,7 +247,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
         alpha = self._alpha()
         q1_pi = self.net.critic_compute(feat_TBH, a_pi_TBA)
         
-        q_val = self.vd.mean_value(q1_pi)
+        q_val = self.vd.mean_value(q1_pi, 0.05, 0.95)
         a_loss = (alpha * logp_TB1 - q_val).mean()
         return a_loss, q_val
 
