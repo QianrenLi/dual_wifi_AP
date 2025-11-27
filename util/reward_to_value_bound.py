@@ -6,7 +6,7 @@ class ValueDistribution:
     def __init__(
         self,
         reward_cfg: dict,
-        scale: float = 2.0,
+        scale: float = 1.1,
         bins: int = 51,
         gamma: float = 0.99,
     ):

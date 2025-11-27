@@ -58,10 +58,10 @@ class Network(nn.Module):
             nn.Linear(hidden, 1)
         )
 
-        self.q1                 = _make_q()
+        self.q1, self.q2        = _make_q(), _make_q()
         
         self.fe_t               = FeatureExtractorGRU(obs_dim + belief_dim, hidden) 
-        self.q1_t               = _make_q()
+        self.q1_t, self.q2_t    = _make_q(), _make_q()
 
         # Actor
         self.fe                 = FeatureExtractorGRU(obs_dim + belief_dim, hidden)
@@ -101,11 +101,14 @@ class Network(nn.Module):
 
     def _hard_sync(self):
         for t, s in zip(self.q1_t.parameters(), self.q1.parameters()): t.data.copy_(s.data)
+        for t, s in zip(self.q2_t.parameters(), self.q2.parameters()): t.data.copy_(s.data)
         for t, s in zip(self.fe_t.parameters(), self.fe.parameters()): t.data.copy_(s.data)
         
     def soft_sync(self, tau):
         with th.no_grad():
             for tp, sp in zip(self.q1_t.parameters(), self.q1.parameters()):
+                tp.mul_(1 - tau).add_(sp, alpha=tau)
+            for tp, sp in zip(self.q2_t.parameters(), self.q2.parameters()):
                 tp.mul_(1 - tau).add_(sp, alpha=tau)
             for tp, sp in zip(self.fe_t.parameters(), self.fe.parameters()):
                 tp.mul_(1 - tau).add_(sp, alpha=tau)
@@ -157,7 +160,7 @@ class Network(nn.Module):
 
     def critic_compute(self, feat: th.Tensor, a: th.Tensor) -> th.Tensor:
         x = th.cat([feat, a], dim=-1)
-        return self.q1(x)
+        return self.q1(x), self.q2(x)
 
     @th.no_grad()
     def target_backup_seq(
@@ -178,9 +181,12 @@ class Network(nn.Module):
 
         a_TBA, logp_TB1 = self.action_compute(feat_TBH, is_evaluate=False)  # [T,B,A], [T,B,1]
 
-        qmin_dist = self.q1_t(th.cat([feat_TBH, a_TBA], dim=-1))
+        q1_dist = self.q1_t(th.cat([feat_TBH, a_TBA], dim=-1))
+        q2_dist = self.q2_t(th.cat([feat_TBH, a_TBA], dim=-1))
         
-        target_dist = vd.soft_target_distribution(qmin_dist, r_TB1, d_TB1, gamma, alpha * logp_TB1)
+        q_avg_dist = 0.5 * (q1_dist + q2_dist)
+        
+        target_dist = vd.soft_target_distribution(q_avg_dist, r_TB1, d_TB1, gamma, alpha * logp_TB1)
         
         return target_dist
 
@@ -199,7 +205,7 @@ class Network(nn.Module):
         return list(self.fe.parameters()) + list(self.mu.parameters()) + list(self.logstd_head.parameters())
     
     def critic_parameters(self):
-        return list(self.q1.parameters())
+        return list(self.q1.parameters()) + list(self.q2.parameters())
     
     def belief_parameters(self):
         return list(self.belief_encoder_gru.parameters()) + list(self.belief_encoder_mu.parameters()) + list(self.belief_encoder_var.parameters()) + list(self.belief_decoder.parameters())

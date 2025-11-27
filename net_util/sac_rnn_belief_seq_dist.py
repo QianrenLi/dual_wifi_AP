@@ -167,25 +167,6 @@ class SACRNNBeliefSeqDist(PolicyBase):
 
         writer.add_scalar("q/qmin_pi", kwargs['qmin_pi'].mean().item(), step)
         writer.add_scalar("policy/logp_pi", kwargs['logp_TB1'].mean().item(), step)
-        q_key = "q_batch"   # change this to whatever name you actually use
-        if q_key in kwargs and kwargs[q_key] is not None and self._global_step % (self.cfg.log_interval * 10) == 0:
-            q_TBK: th.Tensor = kwargs[q_key]          # [T, B, K]
-            q_mean_K = q_TBK.mean(dim=(0, 1))           # [K]
-            
-            q_np = q_mean_K.detach().cpu().numpy()      # [K]
-            K = q_np.shape[0]
-            xs = list(range(K))
-
-            fig, ax = plt.subplots(figsize=(6, 4))
-
-            # --- Option A: bar plot (recommended) ---
-            ax.bar(xs, q_np)
-            ax.set_xlabel("Atom index")
-            ax.set_ylabel("Mean probability")
-            ax.set_title("Mean Q distribution over atoms")
-
-            writer.add_figure("q/dist_mean_bar", fig, global_step=step)
-            plt.close(fig)
     
     
     ## Loss
@@ -233,24 +214,25 @@ class SACRNNBeliefSeqDist(PolicyBase):
             f_h
         )
         
-        q1_TB1 = self.net.critic_compute(feat_TBH, act_TBA)     # [T,B,K]
-        log_q = (q1_TB1.clamp_min(1e-8)).log()
+        q1_pi, q2_pi = self.net.critic_compute(feat_TBH, act_TBA)     # [T,B,K]
+        log_q1 = (q1_pi.clamp_min(1e-8)).log()
+        log_q2 = (q2_pi.clamp_min(1e-8)).log()
         
-        
-        kl_loss = - (backup_q_TB1 * (log_q)).sum(dim=-1)    # [T,B]
+        kl_loss = - (backup_q_TB1 * (log_q1)).sum(dim=-1) - (backup_q_TB1 * (log_q2)).sum(dim=-1)    # [T,B]
         c_loss_batch = kl_loss.mean(0)                      # [B]
         
         c_loss = (c_loss_batch * importance_weights).sum() / (importance_weights.sum() + 1e-8)
 
-        return c_loss, c_loss_batch.detach(), q1_TB1.detach()
+        return c_loss, c_loss_batch.detach()
 
 
     def _actor_loss(self, feat_TBH: Tensor, a_pi_TBA: Tensor, logp_TB1: Tensor) -> Tuple[Tensor, Tensor]:
         """Returns: a_loss, qmin_pi (detached)"""
         alpha = self._alpha()
-        q1_pi = self.net.critic_compute(feat_TBH, a_pi_TBA)
+        q1_pi, q2_pi = self.net.critic_compute(feat_TBH, a_pi_TBA)
         
-        q_val = self.vd.mean_value(q1_pi, 0.1, 0.9)
+        q_val = th.min(self.vd.mean_value(q1_pi), self.vd.mean_value(q2_pi))
+        
         a_loss = (alpha * logp_TB1 - q_val).mean()
         return a_loss, q_val
 
@@ -347,8 +329,8 @@ class SACRNNBeliefSeqDist(PolicyBase):
         feat_TBH, _ = self.net.feature_compute(obs_feat, z_BH, f_h_burn)
 
         # 4) Critic Q-values on dataset actions
-        q_TB1K = self.net.critic_compute(feat_TBH, act_TBA)         # [T,B,K]
-        q_mean_TB1 = self.vd.mean_value(q_TB1K, 0.1, 0.9)          # [T,B,1] (your current API)
+        q_TB1K, q_TB1K2 = self.net.critic_compute(feat_TBH, act_TBA)         # [T,B,K]
+        q_mean_TB1 = th.min(self.vd.mean_value(q_TB1K), self.vd.mean_value(q_TB1K2))          # [T,B,1] (your current API)
         scalar = -q_mean_TB1.mean()                                 # maximize Q -> minimize -Q
 
         scalar.backward()
@@ -482,7 +464,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
             self._step_with_clip( [self.log_alpha], self.alpha_opt, ent_loss, clip_norm=None ) # type: ignore
         
         # Critic update
-        c_loss, c_loss_batch, q_batch = self._critic_loss(
+        c_loss, c_loss_batch = self._critic_loss(
             feat_TBH.detach(), act_train, nxt_train, rew_train, done_train, importance_weights, b_h=h_burn, f_h=f_h_burn
         )
         self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=None)
@@ -497,7 +479,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
         if self._global_step % self.cfg.log_interval == 0:
             self._log_batch_stats(writer, self._global_step, 
                 a_loss=a_loss, c_loss=c_loss, b_loss=b_loss, ent_loss=ent_loss, logp_TB1=logp_TB1, 
-                qmin_pi=qmin_pi, q_batch=q_batch, belief_stats=belief_stats, is_batch_rl=is_batch_rl
+                qmin_pi=qmin_pi, belief_stats=belief_stats, is_batch_rl=is_batch_rl
             )
             
         if self._global_step % (self.cfg.log_interval * 10) == 0:
