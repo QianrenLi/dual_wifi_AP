@@ -57,8 +57,7 @@ class PolicyBase:
         1) Flatten nested obs into a single vector.
         2) If a state transform is configured, normalize it.
         """
-        if self._state_tf is not None:
-            obs = self._state_tf.apply_to_list(obs)
+        obs = self._state_tf.apply_to_list(obs)
         return obs
 
     def train_per_epoch(self, epoch, writer=None, is_batch_rl = False):
