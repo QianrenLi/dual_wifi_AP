@@ -70,7 +70,7 @@ class SACRNNBeliefSeqDistV2_Config:
     cdl_beta_cql_multiplier: float = 5 * 20 
 
     # Internal state helper for annealing beta
-    annealing_max_lb: float = 5e-4
+    annealing_max_lb: float = 1e-3
     annealing_epoch_max: float = 10
 
 

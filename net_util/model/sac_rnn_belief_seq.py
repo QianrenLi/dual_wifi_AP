@@ -149,7 +149,7 @@ class Network(nn.Module):
             u = dist.rsample()
         
         normal_log = dist.log_prob(u).sum(-1, True) 
-        logp_n = normal_log- self._tanh_log_det(u).sum(-1, True)
+        logp_n = normal_log - self._tanh_log_det(u).sum(-1, True)
         
         a = th.tanh(u)
         return a, logp_n
@@ -174,14 +174,14 @@ class Network(nn.Module):
         
         feat_TBH, _ = self.fe_t.encode(th.cat([nxt_TBD, z_TBH], dim=-1), f_h)   # [T,B,H]
 
-        a_TBA, logp_TB1 = self.action_compute(feat_TBH, is_evaluate=True)  # [T,B,A], [T,B,1]
+        a_TBA, logp_TB1 = self.action_compute(feat_TBH, is_evaluate=False)  # [T,B,A], [T,B,1]
 
         qmin = th.min(
             self.q1_t(th.cat([feat_TBH, a_TBA], dim=-1)),
             self.q2_t(th.cat([feat_TBH, a_TBA], dim=-1))
         )
         
-        return r_TB1 + (1 - d_TB1) * gamma * (qmin - alpha * logp_TB1), qmin
+        return r_TB1 + (1 - d_TB1) * gamma * (qmin - alpha * logp_TB1), qmin - alpha * logp_TB1
 
 
     # param groups

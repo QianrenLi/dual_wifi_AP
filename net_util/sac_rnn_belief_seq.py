@@ -222,7 +222,7 @@ class SACRNNBeliefSeq(PolicyBase):
             # Prepare debug stats on target_q and diff/target_q
             with th.no_grad():
                 tgt = target_q.detach()          # [T,B,1]
-                d   = (th.stack([q1_TB1, q2_TB1], dim=0) - tgt).detach()              # [2,T,B,1]
+                d   = (th.min(q1_TB1, q2_TB1) - tgt).detach()              # [2,T,B,1]
 
                 # 2) basic target stats
                 tgt_mean = tgt.mean()
@@ -314,7 +314,7 @@ class SACRNNBeliefSeq(PolicyBase):
         y_hat_B1 = self.net.belief_decode( z_BH )
         
         b_loss, belief_stats = self._belief_loss( y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch )
-        self._step_with_clip( self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=50.0 )
+        self._step_with_clip( self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=None)
         
         
         ## Alpha & Critic & Actor
@@ -331,12 +331,12 @@ class SACRNNBeliefSeq(PolicyBase):
         c_loss, c_loss_batch, cdl_stats = self._critic_loss(
             feat_TBH.detach(), act_train, nxt_train, rew_train, done_train, importance_weights, b_h=h_burn, f_h=f_h_burn
         )
-        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=100.0)
+        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=None)
         self.net.soft_sync(self.cfg.tau)
 
         # Actor update
         a_loss, qmin_pi = self._actor_loss(feat_TBH, a_pi_TBA, logp_TB1)
-        self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=50.0)
+        self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=None)
 
         # Logging
         if self._global_step % self.cfg.log_interval == 0:
@@ -357,7 +357,7 @@ class SACRNNBeliefSeq(PolicyBase):
         # Logic remains the same: load obs, init/update hidden/belief, sample/evaluate, return results.
         obs = th.tensor(obs_vec, device=self.device, dtype=th.float32).unsqueeze(0).unsqueeze(0)
 
-        z_BH, _belief_h, _, _ = self.net.belief_encode(obs, self._belief_h)
+        z_BH, _belief_h, _, _ = self.net.belief_encode(obs, self._belief_h, is_evaluate=is_evaluate)
         y_hat_B1 = self.net.belief_decode(z_BH)
 
         feat, _eval_h = self.net.feature_compute(obs, z_BH, self._eval_h)
