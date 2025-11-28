@@ -83,7 +83,7 @@ class Episode:
 
 # ---------------- single-heap utility used per interference ----------------
 class _InterferenceHeap:
-    """Array-based max-heap keyed by Episode.loss (identical mechanics to your original)."""
+    """Array-based max-heap keyed by Episode.loss."""
     def __init__(self, rebalance_interval: int):
         self.heap: List[Episode] = []
         self._steps_since_rebalance = 0
@@ -393,10 +393,17 @@ class RNNPriReplayInterferenceAware:
 
         ep_ids, probs = self._choose_episode_ids(batch_size)
         if not ep_ids: return
+
         starts = []
-        for (hk, local_idx) in ep_ids:
+        # --- FIX: Adjust probability for trace/slice sampling ---
+        # The probability of picking a specific slice is P(Episode) * (1 / Valid_Starts).
+        # We must divide by valid_length to correct IS weights for long episodes.
+        for i, (hk, local_idx) in enumerate(ep_ids):
             ep = self.interference_heaps[float(hk)].heap[int(local_idx)]
+            valid_len = max(1, ep.data_num - trace_length)
             starts.append(ep.start_point(trace_length))
+            probs[i] /= float(valid_len)
+        # --------------------------------------------------------
 
         obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(ep_ids, starts, trace_length)
 
@@ -429,9 +436,13 @@ class RNNPriReplayInterferenceAware:
         if not ep_ids: return
 
         starts = []
-        for (hk, local_idx) in ep_ids:
+        # --- FIX: Adjust probability for trace/slice sampling ---
+        for i, (hk, local_idx) in enumerate(ep_ids):
             ep = self.interference_heaps[float(hk)].heap[int(local_idx)]
+            valid_len = max(1, ep.data_num - trace_length)
             starts.append(ep.start_point(trace_length))
+            probs[i] /= float(valid_len)
+        # --------------------------------------------------------
 
         obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(ep_ids, starts, trace_length)
         is_w_B1 = self._calc_is_weights(probs)

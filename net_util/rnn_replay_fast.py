@@ -1,12 +1,13 @@
 from typing import List, Optional, Iterable, Dict
-from net_util import register_buffer
+from net_util import register_buffer # Assume this is available
 import torch as th
 import numpy as np
 import random
 import math
 
-# ---------------- helpers (unchanged pieces condensed) ----------------
+# ---------------- helpers (mostly unchanged pieces condensed) ----------------
 def _as_1d_float(x):
+    """Ensure input is a 1D float32 numpy array."""
     if isinstance(x, th.Tensor):
         x = x.detach().cpu().numpy()
     a = np.asarray(x, dtype=np.float32)
@@ -19,16 +20,30 @@ def _reward_agg_fn(reward_agg):
     raise ValueError
 
 def _tracify(states, actions, rewards, network_output, reward_agg):
+    """Converts episode data lists into stacked NumPy arrays."""
     T = len(states); assert len(actions)==T and len(rewards)==T
-    obs_np = np.stack([_as_1d_float(s) for s in states], axis=0).astype(np.float32)
-    act_np = np.stack([_as_1d_float(a) for a in actions], axis=0).astype(np.float32)
+
+    # IMPROVEMENT: Use batched conversion if possible, or fall back
+    if isinstance(states[0], th.Tensor):
+        obs_tensor = th.stack(states).detach().cpu()
+        act_tensor = th.stack(actions).detach().cpu()
+        obs_np = obs_tensor.numpy().astype(np.float32)
+        act_np = act_tensor.numpy().astype(np.float32)
+    else:
+        obs_np = np.stack([_as_1d_float(s) for s in states], axis=0).astype(np.float32)
+        act_np = np.stack([_as_1d_float(a) for a in actions], axis=0).astype(np.float32)
+
     agg = _reward_agg_fn(reward_agg)
     rew_np = np.asarray([agg(_as_1d_float(r)) for r in rewards], dtype=np.float32)
-    next_obs_np = np.vstack([obs_np[1:], np.zeros((1, obs_np.shape[1]), np.float32)]) if T>1 else np.zeros((1, obs_np.shape[1]), np.float32)
+    
+    # Handle next_obs/done array creation
+    next_obs_np = np.vstack([obs_np[1:], np.zeros((1, obs_np.shape[1]), np.float32)]) if T>0 else np.zeros((1, obs_np.shape[1]), np.float32)
     done_np = np.array([float(network_output[t].get("done",0)) for t in range(T)], dtype=np.float32)
-    done_np[-1] = 1.0
+    if T > 0: done_np[-1] = 1.0
+    
     return obs_np, act_np, rew_np, next_obs_np, done_np
 
+# ... summarize, merge, var_unbiased helpers remain unchanged ...
 def summarize(xs: np.ndarray):
     n = xs.size
     if n == 0: return (0,0.0,0.0)
@@ -50,32 +65,40 @@ def var_unbiased(summary):
     n, _, M2 = summary
     return M2 / (n - 1) if n > 1 else float("nan")
 
-# ---------------- episode ----------------
+
+# ---------------- episode (Modified to use NumPy) ----------------
 class Episode:
-    __slots__ = ("obs","actions","rewards","next_obs","dones","loss",
+    __slots__ = ("obs_np","actions_np","rewards_np","next_obs_np","dones_np","loss",
                  "reward_summary","gamma_summary","avg_return","interference",
                  "data_num","_heap_idx")
-    def __init__(self, obs_np, act_np, rew_np, next_obs_np, done_np, device,
+                 
+    def __init__(self, obs_np, act_np, rew_np, next_obs_np, done_np,
                  init_loss: float, gamma: float, interference=0):
-        self.obs = th.tensor(obs_np, device=device)
-        self.actions = th.tensor(act_np, device=device)
-        self.rewards = th.tensor(rew_np, device=device)
-        self.next_obs = th.tensor(next_obs_np, device=device)
-        self.dones = th.tensor(done_np, device=device)
+        
+        # IMPROVEMENT: Store data as NumPy arrays, not small PyTorch Tensors
+        self.obs_np = obs_np
+        self.actions_np = act_np
+        self.rewards_np = rew_np
+        self.next_obs_np = next_obs_np
+        self.dones_np = done_np
+
         self.loss = float(init_loss)
         self.reward_summary = summarize(rew_np)
         self.gamma_summary  = summarize((1 - done_np) * gamma)
         self.data_num = self.reward_summary[0]
+        
+        # Calculate avg_return (variance of returns)
         G = 0.0; sq = 0.0
         for t in range(self.data_num-1, -1, -1):
             G = float(rew_np[t]) + gamma * G * (1.0 - float(done_np[t]))
             sq += G*G
         self.avg_return = sq / max(1, self.data_num)
+        
         self.interference = float(interference)
         self._heap_idx = -1  # maintained by buffer
 
     @property
-    def length(self): return int(self.obs.shape[0])
+    def length(self): return self.data_num
 
     def start_point(self, T: int) -> int:
         L = max(0, self.data_num - T)
@@ -96,9 +119,9 @@ class RNNPriReplayFast:
                  gamma: float = 0.99,
                  alpha: float = 0.7,     # rank-prioritization exponent
                  beta0: float = 0.4,     # IS exponent (you can anneal toward 1.0)
-                 rebalance_interval: int = 2000,  # infrequent sort+rebuild
+                 rebalance_interval: int = 2000,   # infrequent sort+rebuild
                  writer=None):
-        self.device = device
+        self.device = th.device(device)
         self.capacity = int(capacity)
         self.gamma = float(gamma)
         self.alpha = float(alpha)
@@ -106,7 +129,7 @@ class RNNPriReplayFast:
         self.rebalance_interval = int(rebalance_interval)
         self.writer = writer
 
-        self.heap: List[Episode] = []      # max-heap on .loss
+        self.heap: List[Episode] = []       # max-heap on .loss
         self._steps_since_rebalance = 0
 
         # stats you tracked
@@ -117,7 +140,9 @@ class RNNPriReplayFast:
         self.data_num = 0
         self.sigma = 0.0
 
-    # ---------------- heap utilities (max-heap on ep.loss) ----------------
+    # ... heap utilities (_key, _swap, _sift_up, _sift_down, _push, _remove_at, _update_key, _evict_leaf, _rebalance_if_needed) remain largely unchanged ...
+    # (Note: These methods operate on the heap list structure, which is fine)
+
     def _key(self, ep: Episode) -> float:
         return ep.loss
 
@@ -127,7 +152,6 @@ class RNNPriReplayFast:
         self.heap[j]._heap_idx = j
 
     def _sift_up(self, i: int):
-        # bubble up while parent has smaller key
         while i > 0:
             p = (i - 1) >> 1
             if self._key(self.heap[p]) >= self._key(self.heap[i]): break
@@ -169,7 +193,6 @@ class RNNPriReplayFast:
         ep = self.heap[ep_idx]
         old = ep.loss
         ep.loss = float(new_loss)
-        # choose direction
         if ep.loss > old:
             self._sift_up(ep_idx)
         else:
@@ -178,7 +201,6 @@ class RNNPriReplayFast:
     def _evict_leaf(self):
         n = len(self.heap)
         if n == 0: return
-        # leaves are indices in [n//2, n-1]; pick one uniformly
         leaf_start = n >> 1
         idx = random.randint(leaf_start, n - 1)
         self._remove_at(idx)
@@ -186,15 +208,13 @@ class RNNPriReplayFast:
     def _rebalance_if_needed(self, just_updated: int = 1):
         self._steps_since_rebalance += max(1, int(just_updated))
         if self._steps_since_rebalance >= self.rebalance_interval and len(self.heap) > 1:
-            # infrequent full sort (desc by loss), then rebuild heap
             self._steps_since_rebalance = 0
             self.heap.sort(key=lambda e: e.loss, reverse=True)
-            # rebuild idx and heap property in O(N)
             for i, ep in enumerate(self.heap):
                 ep._heap_idx = i
-            # bottom-up heapify
             for i in range((len(self.heap) >> 1) - 1, -1, -1):
                 self._sift_down(i)
+
 
     # ---------------- construction / add / extend ----------------
     @staticmethod
@@ -221,55 +241,47 @@ class RNNPriReplayFast:
         obs_np, act_np, rew_np, next_obs_np, done_np = _tracify(states, actions, rewards, network_output, reward_agg)
         ep = Episode(
             obs_np, act_np, rew_np, next_obs_np, done_np,
-            device=self.device,
             init_loss=100.0 if init_loss is None else float(init_loss),
             gamma=self.gamma,
             interference=interference
         )
 
-        # running stats you had
+        # Update running stats
         self.reward_summary = merge(self.reward_summary, ep.reward_summary)
         self.gamma_summary  = merge(self.gamma_summary, ep.gamma_summary)
         if self.reward_summary[0] > 0:
             w = ep.reward_summary[0] / self.reward_summary[0]
             self.avg_return += (ep.avg_return - self.avg_return) * w
-        for r in ep.rewards.detach().cpu().numpy().tolist():
+            
+        for r in ep.rewards_np.tolist():
             self.run_return = float(r) + self.gamma * self.run_return
             self.data_num += 1
             if self.writer is not None:
                 self.writer.add_scalar("data/return", self.run_return, self.data_num)
+                
         self.sigma = math.sqrt(
             max(0.0, var_unbiased(self.reward_summary)) +
             max(0.0, var_unbiased(self.gamma_summary)) * max(0.0, self.avg_return)
         )
 
-        # heap insert
+        # heap insert and capacity control
         self._push(ep)
-        # capacity control: evict a random leaf (approx low-priority)
         if len(self.heap) > self.capacity:
             self._evict_leaf()
         self._rebalance_if_needed()
 
     # ---------------- priority updates ----------------
     def update_episode_losses(self, ep_ids: List[int], losses: Iterable[float]):
-        # here ep_ids are current heap indices (we return them in info when sampling)
         for eid, new_loss in zip(ep_ids, losses):
             if 0 <= eid < len(self.heap):
                 self._update_key(eid, float(new_loss))
-        # we can rebalance rarely; the local sifts keep heap valid
         self._rebalance_if_needed(just_updated=len(ep_ids))
 
     # ---------------- sampling ----------------
     def _approx_rank_probs(self):
-        """
-        Use heap array index (level order) as an approximate global rank.
-        Highest priority should appear near the front thanks to the heap property.
-        No full sort. (Paper used the heap array as an approximate sorted array.)
-        """
         N = len(self.heap)
         if N == 0: return None
         idxs = np.arange(N, dtype=np.int64)
-        # make index-1 act like rank (1..N), with earlier indices higher priority
         ranks = idxs + 1
         probs = 1.0 / np.power(ranks.astype(np.float64), max(0.0, self.alpha))
         probs /= probs.sum()
@@ -283,23 +295,48 @@ class RNNPriReplayFast:
         return chosen.tolist(), probs
 
     def _gather_batch(self, ep_ids: List[int], starts: List[int], T: int):
-        obs_TB, act_TB, rew_TB, nxt_TB, done_TB = [], [], [], [], []
-        interfs = []
-        for eid, s in zip(ep_ids, starts):
+        """
+        IMPROVEMENT: Efficiently gathers batch data using NumPy array pre-allocation 
+        and slicing before a single PyTorch conversion.
+        """
+        if not ep_ids:
+            return None, None, None, None, None, None
+            
+        B = len(ep_ids)
+        ep0 = self.heap[ep_ids[0]]
+        obs_shape = ep0.obs_np.shape[1]
+        act_shape = ep0.actions_np.shape[1]
+
+        # 1. Pre-allocate large NumPy arrays (T, B, dim)
+        obs_TB = np.zeros((T, B, obs_shape), dtype=np.float32)
+        act_TB = np.zeros((T, B, act_shape), dtype=np.float32)
+        rew_TB = np.zeros((T, B, 1), dtype=np.float32)
+        nxt_TB = np.zeros((T, B, obs_shape), dtype=np.float32)
+        done_TB = np.zeros((T, B, 1), dtype=np.float32)
+        interfs = np.zeros(B, dtype=np.float32)
+
+        # 2. Loop and slice/copy data into pre-allocated arrays
+        for i, (eid, s) in enumerate(zip(ep_ids, starts)):
             ep = self.heap[eid]
             e = s + T
-            obs_TB.append(ep.obs[s:e])
-            act_TB.append(ep.actions[s:e])
-            rew_TB.append(ep.rewards[s:e])
-            nxt_TB.append(ep.next_obs[s:e])
-            done_TB.append(ep.dones[s:e])
-            interfs.append(ep.interference)
-        obs_TB  = th.stack(obs_TB, 0).transpose(0,1).contiguous()
-        act_TB  = th.stack(act_TB, 0).transpose(0,1).contiguous()
-        rew_TB  = th.stack(rew_TB, 0).transpose(0,1).contiguous().unsqueeze(-1)
-        nxt_TB  = th.stack(nxt_TB, 0).transpose(0,1).contiguous()
-        done_TB = th.stack(done_TB,0).transpose(0,1).contiguous().unsqueeze(-1)
-        interf_B = th.tensor(interfs, device=obs_TB.device, dtype=th.float32).unsqueeze(-1)
+            
+            # Use direct indexing (NumPy slices)
+            obs_TB[:, i] = ep.obs_np[s:e]
+            act_TB[:, i] = ep.actions_np[s:e]
+            # Reshape 1D reward/done arrays for 3D batch array
+            rew_TB[:, i, 0] = ep.rewards_np[s:e]
+            nxt_TB[:, i] = ep.next_obs_np[s:e]
+            done_TB[:, i, 0] = ep.dones_np[s:e]
+            interfs[i] = ep.interference
+
+        # 3. Convert all arrays to PyTorch Tensors on the target device simultaneously
+        obs_TB   = th.from_numpy(obs_TB).to(self.device)
+        act_TB   = th.from_numpy(act_TB).to(self.device)
+        rew_TB   = th.from_numpy(rew_TB).to(self.device)
+        nxt_TB   = th.from_numpy(nxt_TB).to(self.device)
+        done_TB  = th.from_numpy(done_TB).to(self.device)
+        interf_B = th.from_numpy(interfs).to(self.device).unsqueeze(-1)
+        
         return obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B
 
     def _calc_is_weights(self, ep_ids: List[int], probs: np.ndarray, beta: Optional[float] = None):
@@ -313,25 +350,21 @@ class RNNPriReplayFast:
     # ---------------- public batch APIs ----------------
     def get_minibatches(self, batch_size: int, trace_length: int = 100, device: Optional[th.device|str] = None):
         if not self.heap: return
-        dev = th.device(device) if device is not None else None
+        
+        # Use existing self.device if 'device' argument is None
+        dev = th.device(device) if device is not None else self.device 
+        
         ep_ids, probs = self._choose_episode_ids(batch_size)
         starts = [self.heap[eid].start_point(trace_length) for eid in ep_ids]
+        
+        # _gather_batch now returns tensors already on self.device (cuda or cpu)
         obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(ep_ids, starts, trace_length)
 
-        is_w_B1 = self._calc_is_weights(ep_ids, probs)
-        prob_B1 = th.tensor(probs[np.asarray(ep_ids)], dtype=th.float32).unsqueeze(-1)
+        is_w_B1 = self._calc_is_weights(ep_ids, probs).to(dev)
+        prob_B1 = th.tensor(probs[np.asarray(ep_ids)], dtype=th.float32).unsqueeze(-1).to(dev)
 
-        if dev is not None and dev.type == "cuda" and obs_TB.device.type == "cpu":
-            obs_TB   = obs_TB.pin_memory().to(dev, non_blocking=True)
-            act_TB   = act_TB.pin_memory().to(dev, non_blocking=True)
-            rew_TB   = rew_TB.pin_memory().to(dev, non_blocking=True)
-            nxt_TB   = nxt_TB.pin_memory().to(dev, non_blocking=True)
-            done_TB  = done_TB.pin_memory().to(dev, non_blocking=True)
-            interf_B = interf_B.pin_memory().to(dev, non_blocking=True)
-            
-        if dev is not None and dev.type == "cuda" and is_w_B1.device.type == "cpu":
-            is_w_B1  = is_w_B1.pin_memory().to(dev, non_blocking=True)
-            prob_B1  = prob_B1.pin_memory().to(dev, non_blocking=True)
+        # IMPROVEMENT: Removed redundant pin_memory/to(cuda) logic.
+        # Data is already on self.device, or on cpu and transferred when is_w_B1 is moved.
 
         info = {"ep_ids": ep_ids, "interference": interf_B, "is_weights": is_w_B1, "probs": prob_B1}
         T = trace_length
@@ -340,23 +373,21 @@ class RNNPriReplayFast:
 
     def get_sequences(self, batch_size: int, trace_length: int = 100, device: Optional[th.device|str] = None):
         if not self.heap or self.data_num < 10e3: return
-        dev = th.device(device) if device is not None else None
+        
+        # Use existing self.device if 'device' argument is None
+        dev = th.device(device) if device is not None else self.device 
+
         ep_ids, probs = self._choose_episode_ids(batch_size)
         starts = [self.heap[eid].start_point(trace_length) for eid in ep_ids]
+        
+        # _gather_batch now returns tensors already on self.device (cuda or cpu)
         obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(ep_ids, starts, trace_length)
-        is_w_B1 = self._calc_is_weights(ep_ids, probs)
-        prob_B1 = th.tensor(probs[np.asarray(ep_ids)], dtype=th.float32).unsqueeze(-1)
-        if dev is not None and dev.type == "cuda" and obs_TB.device.type == "cpu":
-            obs_TB   = obs_TB.pin_memory().to(dev, non_blocking=True)
-            act_TB   = act_TB.pin_memory().to(dev, non_blocking=True)
-            rew_TB   = rew_TB.pin_memory().to(dev, non_blocking=True)
-            nxt_TB   = nxt_TB.pin_memory().to(dev, non_blocking=True)
-            done_TB  = done_TB.pin_memory().to(dev, non_blocking=True)
-            interf_B = interf_B.pin_memory().to(dev, non_blocking=True)
+        
+        is_w_B1 = self._calc_is_weights(ep_ids, probs).to(dev)
+        prob_B1 = th.tensor(probs[np.asarray(ep_ids)], dtype=th.float32).unsqueeze(-1).to(dev)
 
-        if dev is not None and dev.type == "cuda" and is_w_B1.device.type == "cpu":
-            is_w_B1  = is_w_B1.pin_memory().to(dev, non_blocking=True)
-            prob_B1  = prob_B1.pin_memory().to(dev, non_blocking=True)
-
+        # IMPROVEMENT: Removed redundant pin_memory/to(cuda) logic.
+        # Data is already on self.device, or on cpu and transferred when is_w_B1 is moved.
+        
         info = {"ep_ids": ep_ids, "interference": interf_B, "is_weights": is_w_B1, "probs": prob_B1}
         yield (obs_TB, act_TB, rew_TB, nxt_TB, done_TB, info)

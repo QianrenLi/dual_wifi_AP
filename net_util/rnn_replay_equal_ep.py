@@ -112,9 +112,9 @@ class RNNPriReplayEqualEp:
                  gamma: float = 0.99,
                  alpha: float = 0.7,     # rank-prioritization exponent
                  beta0: float = 0.4,     # IS exponent (you can anneal toward 1.0)
-                 rebalance_interval: int = 2000,   # infrequent sort+rebuild
+                 rebalance_interval: int = 100,   # infrequent sort+rebuild
                  writer=None,
-                 episode_length: int = 300):
+                 episode_length: int = 600):
         self.device = th.device(device)
         self.capacity = int(capacity)
         self.gamma = float(gamma)
@@ -224,7 +224,7 @@ class RNNPriReplayEqualEp:
             buf.add_episode(states, actions, rewards, network_output, reward_agg, init_loss, interf)
         return buf
 
-    def extend(self, traces, reward_agg="sum", init_loss: Optional[float] = None, episode_length=100, **kwargs):
+    def extend(self, traces, reward_agg="sum", init_loss: Optional[float] = None, **kwargs):
         interfs = kwargs.get("interference_vals", [0]*len(traces))
         for (states, actions, rewards, network_output), interf in zip(traces, interfs):
             self.add_episode(states, actions, rewards, network_output, reward_agg, init_loss, interf)
@@ -391,10 +391,3 @@ class RNNPriReplayEqualEp:
         yield (obs_TB, act_TB, rew_TB, nxt_TB, done_TB, info)
 
         
-    
-    # You can use the below method to sample from the replay buffer
-    def sample(self, batch_size: int):
-        """Sample a batch of episodes with uniform priority sampling."""
-        ep_ids, probs = self._choose_episode_ids(batch_size)
-        starts = [0] * len(ep_ids)  # No need for start points in this version
-        return self._gather_batch(ep_ids, starts, self.episode_length)
