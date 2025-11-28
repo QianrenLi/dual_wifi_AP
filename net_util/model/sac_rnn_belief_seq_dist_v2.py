@@ -49,8 +49,14 @@ class Network(nn.Module):
 
         # Belief
         self.belief_encoder_gru = FeatureExtractorGRU(obs_dim, hidden)
-        self.belief_encoder_mu  = nn.Linear(hidden, belief_dim)
-        self.belief_encoder_var = nn.Linear(hidden, belief_dim)
+        self.belief_encoder_mu  = nn.Sequential(
+            nn.Linear(hidden, belief_dim),
+            nn.Tanh()
+        )
+        self.belief_encoder_var = nn.Sequential(
+            nn.Linear(hidden, belief_dim),
+            nn.Softplus()
+        )
         
         self.belief_decoder     = nn.Sequential(
             nn.Linear(belief_dim, belief_labels_dim),
