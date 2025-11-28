@@ -53,9 +53,7 @@ class Network(nn.Module):
         self.belief_encoder_var = nn.Linear(hidden, belief_dim)
         
         self.belief_decoder     = nn.Sequential(
-            nn.Linear(belief_dim, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, 1)
+            nn.Linear(belief_dim, 1),
         )
 
         self.q1, self.q2        = _make_q(), _make_q()
@@ -133,7 +131,7 @@ class Network(nn.Module):
         return latent, b_h_next, mu_v, logstd * 2
     
     def belief_decode(self, latent: th.Tensor) -> th.Tensor:
-        return self.belief_decoder(latent)                 # [B, 1]
+        return self.belief_decoder(latent)                 # [B, K]
 
     def feature_compute(self, obs: th.Tensor, latent: th.Tensor, f_h: th.Tensor = None) -> Tuple[th.Tensor, th.Tensor]:
         return self.fe.encode(th.cat([obs, latent], dim=-1), f_h)   # [T,B,H]
