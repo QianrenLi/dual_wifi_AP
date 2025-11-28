@@ -159,7 +159,6 @@ class SACRNNBeliefSeqDistV4(PolicyBase):
         writer.add_scalar("loss/actor", kwargs['a_loss'].item(), step)
         writer.add_scalar("loss/critic", kwargs['c_loss'].item(), step)
         writer.add_scalar("loss/belief", kwargs['b_loss'].item(), step)
-        writer.add_scalar("loss/KL", kwargs['belief_stats']['loss/KL'], step)
         
         if self.alpha_opt is not None:
             writer.add_scalar("loss/entropy", kwargs['ent_loss'].item(), step)
@@ -474,8 +473,7 @@ class SACRNNBeliefSeqDistV4(PolicyBase):
             
         if self._global_step % (self.cfg.log_interval * 10) == 0:
             self._probe_z_ablation_feature(obs_train, h_burn, f_h_burn, writer, self._global_step)
-            self._probe_z_gradient_importance(obs_train, act_train, h_burn, f_h_burn, writer, self._global_step)
-            self._probe_z_weight_importance(writer, self._global_step)
+            self._probe_z_ablation_action(obs_train, h_burn, f_h_burn, writer, self._global_step, noise_std=0.1)
 
         self._global_step += 1
         # self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.cpu().numpy()) # type: ignore

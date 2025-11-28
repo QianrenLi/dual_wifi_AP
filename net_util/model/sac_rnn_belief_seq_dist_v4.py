@@ -118,8 +118,6 @@ class Network(nn.Module):
     def belief_encode(self, obs: th.Tensor, b_h: th.Tensor = None, is_evaluate = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         feat, b_h_next   = self.belief_encoder_gru._encode(obs, b_h)
         mu_v             = self.belief_encoder_mu(feat)
-
-            
         return mu_v, b_h_next
     
     def belief_decode(self, latent: th.Tensor) -> th.Tensor:
@@ -195,10 +193,10 @@ class Network(nn.Module):
 
     # param groups
     def actor_parameters(self):
-        return list(self.fe.parameters()) + list(self.mu.parameters()) + list(self.logstd_head.parameters()) + list(self.belief_encoder_gru.parameters()) + list(self.belief_encoder_mu.parameters()) + list(self.belief_encoder_var.parameters())
+        return list(self.fe.parameters()) + list(self.mu.parameters()) + list(self.logstd_head.parameters())
     
     def critic_parameters(self):
         return list(self.q1.parameters()) + list(self.q2.parameters()) 
     
     def belief_parameters(self):
-        return list(self.belief_encoder_gru.parameters()) + list(self.belief_encoder_mu.parameters()) + list(self.belief_encoder_var.parameters()) + list(self.belief_decoder.parameters())
+        return list(self.belief_encoder_gru.parameters()) + list(self.belief_encoder_mu.parameters()) + list(self.belief_decoder.parameters())
