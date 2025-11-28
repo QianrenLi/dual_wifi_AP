@@ -140,6 +140,12 @@ class C_LIST_FLOAT_DIM2_0_1(CListFloat):
     value_range = (0.0, 1.0)
     
 @register_jo()
+class C_LIST_FLOAT_DIM1_0_1(CListFloat):
+    dim = 1
+    active = [0, 0, 0, 1]
+    value_range = (0.0, 1.0)
+    
+@register_jo()
 class C_LIST_FLOAT_DIM3_0_500(CListFloat):
     dim = 3
     value_range = (0.0, 500)
@@ -160,7 +166,7 @@ class C_INT_RANGE_0_13_TypeII(CIntTypeII):
 @register_jo()
 @dataclass
 class ControlCmd:
-    policy_parameters: C_LIST_FLOAT_DIM2_0_1
+    policy_parameters: C_LIST_FLOAT_DIM1_0_1
     version: C_INT_RANGE_0_13
     
     @staticmethod

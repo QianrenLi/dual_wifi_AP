@@ -24,7 +24,7 @@ def load_config_file(config_name):
     spec.loader.exec_module(cfg)
     return cfg
 
-def create_transmission_config(config_name, exp_name, conn: Connector, is_update=False) -> Tuple[TxSrcs, Flows, TxSrcs, Flows]:
+def create_transmission_config(config_name, exp_name, conn: Connector, is_update=False, duration = None) -> Tuple[TxSrcs, Flows, TxSrcs, Flows]:
     cfg = load_config_file(config_name)
     macs_need_separate = cfg.macs_need_separate
     clients = Connector().list_all()
@@ -66,6 +66,8 @@ def create_transmission_config(config_name, exp_name, conn: Connector, is_update
             
             data_path = f"{network_folder}/{src}_{dest}.json"
             with open(data_path, "w") as f:
+                if duration:
+                    policy_configs[src][dest]['agent_cfg']['duration'] = duration
                 f.write(json.dumps(policy_configs[src][dest], indent=4))
             tx_srcs[src]['control_config'] = data_path
     

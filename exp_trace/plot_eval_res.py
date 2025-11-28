@@ -41,7 +41,7 @@ def _collect_pct_from_logs(logs: List["ChannelLog"]) -> tuple[np.ndarray, np.nda
     """Aggregate per-seq percentages (% units) across multiple ChannelLog objects."""
     pct0_all, pct1_all = [], []
     for lg in logs:
-        per_seq = lg.get_interface_percentages()  # {seq: [pct0, pct1]}
+        per_seq = lg.get_interface_percentages(group_factor = 6)  # {seq: [pct0, pct1]}
         pct0_all.append([])
         for _, pair in per_seq.items():
             if not isinstance(pair, (list, tuple)) or len(pair) != 2:
@@ -65,76 +65,113 @@ def summarize_rollouts_for_bars(rollouts: List["Rollout"], agg: str = "mean"):
     return thr_vals, out_vals, reward_vals
 
 # ------------------------------- Plotting ------------------------------- #
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import AutoMinorLocator
+from typing import Sequence, Dict, List, Optional, Tuple, Any
 def plot_interface_percentages_boxplot(
-    logs: List["ChannelLog"],
-    labels: Sequence[str] = ("Interface 0", "Interface 1"),
-    title: Optional[str] = "Interface usage per sequence (aggregated)",
-    ylabel: Optional[str] = "Percentage per seq (%)",
-    show_points: bool = True,
-    point_alpha: float = 0.6,
+    logs: Any,
+    labels: Sequence[str],
+    show_points: bool = False,
     jitter: float = 0.10,
+    point_alpha: float = 0.25,
+    ylabel: Optional[str] = None,
+    title: Optional[str] = None,
     save_path: Optional[str] = None,
+    y_range: Optional[Tuple[float, float]] = (0.0, 100.0),
+    annotate_n: bool = True,
+    bw_method: Optional[float] = None,   # e.g., 0.3 for smoother, None = default
 ):
     """
-    Box plot of per-seq interface percentages, aggregated over a list of ChannelLog.
+    Scientific-style violin plot (Matplotlib only).
 
-    Each log contributes its per-seq percentages (from get_interface_percentages()).
-    The distributions for IF0 and IF1 are then shown as two boxes.
-
-    Parameters
-    ----------
-    logs : List[ChannelLog]
-        Input logs to aggregate.
-    labels : tuple[str, str]
-        Box labels for the two interfaces.
-    title, ylabel : str | None
-        Plot title and y-axis label.
-    show_points : bool
-        Overlay jittered per-seq points.
-    point_alpha : float
-        Alpha for the scatter points.
-    jitter : float
-        Horizontal jitter width for scatter points.
-    save_path : str | None
-        If provided, saves the figure; otherwise returns (fig, ax).
+    Enhancements:
+    - Quartiles (Q1, median, Q3) and Tukey whiskers (1.5*IQR) overlaid on each violin
+    - Optional raw points with gentle jitter
+    - Minor gridlines, de-cluttered spines, consistent y-range default to [0,100]
+    - Optional sample-size annotation under each x tick
+    - Optional KDE bandwidth control via `bw_method`
     """
+    # Collect data (each entry a 1D array-like of percentages)
     pct0 = _collect_pct_from_logs(logs)
-    data = pct0
+    data = [np.asarray(a, dtype=float).ravel() for a in pct0]
+
+    # Positions
+    positions = np.arange(1, len(data) + 1, dtype=float)
 
     fig, ax = plt.subplots()
-    bp = ax.boxplot(
-        data,
-        labels=list(labels),
-        showfliers=False,
-        patch_artist=False,
+
+    # ---- Violin distributions ----
+    vp = ax.violinplot(
+        dataset=data,
+        positions=positions,
+        showmeans=False,
+        showmedians=False,
+        showextrema=False,
+        widths=0.8,
+        bw_method=bw_method,
     )
 
-    # Optional scatter overlay for distribution intuition
+    # Make violins slightly translucent (don’t set specific colors)
+    for b in vp["bodies"]:
+        b.set_alpha(0.6)
+
+    # ---- Overlays: quartiles, median, whiskers ----
+    for i, arr in enumerate(data, start=1):
+        if arr.size == 0 or not np.isfinite(arr).any():
+            continue
+
+        q1, q2, q3 = np.percentile(arr, [25, 50, 75])
+        iqr = q3 - q1
+        # Tukey whiskers
+        lo = np.min(arr[arr >= q1 - 1.5 * iqr]) if arr.size else q1
+        hi = np.max(arr[arr <= q3 + 1.5 * iqr]) if arr.size else q3
+
+        # IQR bar
+        ax.vlines(i, q1, q3, lw=3, zorder=4)
+        # Median mark
+        ax.scatter([i], [q2], s=22, zorder=5)
+        # Whiskers + caps
+        ax.vlines(i, lo, hi, lw=1.2, zorder=4)
+        ax.hlines([lo, hi], i - 0.08, i + 0.08, lw=1.2, zorder=4)
+
+    # ---- Optional raw samples ----
     if show_points:
-        rng = np.random.default_rng(0)  # reproducible jitter
+        rng = np.random.default_rng(0)
         for i, arr in enumerate(data, start=1):
             if arr.size == 0:
                 continue
             xs = i + rng.uniform(-jitter, jitter, size=arr.size)
-            ax.scatter(xs, arr, alpha=point_alpha, s=18, zorder=3, edgecolors="none")
+            ax.scatter(xs, arr, alpha=point_alpha, s=14, zorder=3, edgecolors="none")
 
+    # ---- Axes cosmetics ----
+    ax.set_xticks(positions)
+    ax.set_xticklabels(list(labels))
     if ylabel:
         ax.set_ylabel(ylabel, fontsize=13)
     if title:
-        ax.set_title(title, fontsize=14)
+        ax.set_title(title, fontsize=15)
 
-    # Cosmetics similar to your bar style
-    ax.grid(True, axis="y", linestyle="--", alpha=0.4, zorder=0)
+    if y_range is not None:
+        ax.set_ylim(*y_range)
+
+    # Grid: major + minor on Y only
+    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+    ax.grid(True, axis="y", which="major", linestyle="--", alpha=0.4, zorder=0)
+    ax.grid(True, axis="y", which="minor", linestyle=":", alpha=0.25, zorder=0)
+
+    # De-clutter spines & ticks
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(axis="x", labelsize=12)
     ax.tick_params(axis="y", labelsize=12)
-    # plt.tight_layout()
+
+    plt.tight_layout()
 
     if save_path:
-        plt.savefig(save_path, dpi=150)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close(fig)
-        print(f"Save to {save_path}")
+        print(f"Saved to {save_path}")
         return None
     return fig, ax
 
@@ -286,7 +323,8 @@ def main():
     
     try:
         plot_interface_percentages_boxplot(seq_interface, il_ids, title="Channel Utilization per rollout", ylabel="Factor", save_path=str(out_dir / "percentage.png"), show_points=False)
-    except:
+    except Exception as e:
+        print(f"[error] Failed to plot interface percentages: {e}")
         pass
     
 
