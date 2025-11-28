@@ -205,8 +205,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
         # ------------------------------------------------------------------
         kl_loss = 0.5 * (mu_TB1.pow(2) + logvar_TB1.exp() - logvar_TB1 - 1.0).sum(-1).mean()
         
-        print(cross_entropy)
-        print(kl_loss)
+        
 
         beta = self._get_beta(epoch)
         b_loss = cross_entropy + beta * kl_loss
@@ -524,7 +523,7 @@ class SACRNNBeliefSeqDist(PolicyBase):
 
         z_BH, _belief_h, _, _ = self.net.belief_encode(obs, self._belief_h, is_evaluate=is_evaluate)
         y_hat_B1 = self.net.belief_decode(z_BH)
-        belief = F.softmax(y_hat_B1, dim=-1) * th.arange(y_hat_B1.shape[-1], device=self.device).sum(dim=-1, keepdim=True)
+        belief = (F.softmax(y_hat_B1, dim=-1) * th.arange(y_hat_B1.shape[-1], device=self.device)).sum(dim=-1, keepdim=True)
 
         feat, _eval_h = self.net.feature_compute(obs, z_BH, self._eval_h)
         
