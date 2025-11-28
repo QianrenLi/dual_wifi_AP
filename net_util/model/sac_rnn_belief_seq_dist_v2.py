@@ -35,7 +35,7 @@ class FeatureExtractorGRU(nn.Module):
 
 
 class Network(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, bins: int, hidden=128, belief_dim=1,
+    def __init__(self, obs_dim: int, act_dim: int, bins: int, hidden=128, belief_dim=1, belief_labels_dim=5,
                  init_log_std=-2.0, log_std_min=-20.0, log_std_max=2.0):
         super().__init__()
         self.log_std_min, self.log_std_max = float(log_std_min), float(log_std_max)
@@ -53,9 +53,7 @@ class Network(nn.Module):
         self.belief_encoder_var = nn.Linear(hidden, belief_dim)
         
         self.belief_decoder     = nn.Sequential(
-            nn.Linear(belief_dim, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, 1)
+            nn.Linear(belief_dim, belief_labels_dim),
         )
 
         self.q1, self.q2        = _make_q(), _make_q()
