@@ -341,7 +341,7 @@ class SACRNNBeliefSeqDistV2(PolicyBase):
             return
 
         # 1) Get z from belief encoder (no grad, just a probe)
-        z_BH, _ = self.net.belief_encode(obs_TBD, b_h=h_burn)      # [T,B,H_z] or [B,H_z] depending on impl
+        z_BH, _, _, _ = self.net.belief_encode(obs_TBD, b_h=h_burn)      # [T,B,H_z] or [B,H_z] depending on impl
 
         # 2) Features + actions with real z
         feat_full_TBH, _ = self.net.feature_compute(obs_TBD, z_BH, f_h_burn)  # [T,B,H]
