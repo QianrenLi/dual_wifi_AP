@@ -159,7 +159,8 @@ def main():
     )
     plt.tight_layout()
     # plt.show()
-    plt.savefig("test.png")
+    plt.savefig("action_plot.png")
+    print("Saved to exp_trace/action_plot.png")
 
 if __name__ == "__main__":
     main()
