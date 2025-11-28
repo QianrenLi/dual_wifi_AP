@@ -53,9 +53,8 @@ class Network(nn.Module):
             nn.Linear(hidden, belief_dim),
             nn.Tanh()
         )
-        self.belief_encoder_var = nn.Sequential(
+        self.belief_encoder_log_std = nn.Sequential(
             nn.Linear(hidden, belief_dim),
-            nn.Softplus()
         )
         
         self.belief_decoder     = nn.Sequential(
@@ -125,16 +124,17 @@ class Network(nn.Module):
     def belief_encode(self, obs: th.Tensor, b_h: th.Tensor = None, is_evaluate = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         feat, b_h_next   = self.belief_encoder_gru._encode(obs, b_h)
         mu_v             = self.belief_encoder_mu(feat)
-        logstd           = self.belief_encoder_var(feat)
+        logstd           = self.belief_encoder_log_std(feat)
 
         # reparameterize
-        dist = th.distributions.Normal(mu_v, logstd.exp())
+        std = 1e-3 + (1-1e-3) * F.sigmoid(logstd)
+        dist = th.distributions.Normal(mu_v, std)
         if is_evaluate:
             latent = dist.mode
         else:
             latent = dist.rsample()
             
-        return latent, b_h_next, mu_v, logstd * 2
+        return latent, b_h_next, mu_v, th.log(std) * 2
     
     def belief_decode(self, latent: th.Tensor) -> th.Tensor:
         return self.belief_decoder(latent)                 # [B, 1]
@@ -215,4 +215,4 @@ class Network(nn.Module):
         return list(self.q1.parameters()) + list(self.q2.parameters())
     
     def belief_parameters(self):
-        return list(self.belief_encoder_gru.parameters()) + list(self.belief_encoder_mu.parameters()) + list(self.belief_encoder_var.parameters()) + list(self.belief_decoder.parameters())
+        return list(self.belief_encoder_gru.parameters()) + list(self.belief_encoder_mu.parameters()) + list(self.belief_encoder_log_std.parameters()) + list(self.belief_decoder.parameters())
