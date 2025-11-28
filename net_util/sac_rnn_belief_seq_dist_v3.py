@@ -477,7 +477,7 @@ class SACRNNBeliefSeqDistV2(PolicyBase):
         
         ## Alpha & Critic & Actor
         z_BH, _, _, _ = self.net.belief_encode( obs_train, b_h=h_burn )
-        feat_TBH, _ = self.net.feature_compute( obs_train, z_BH.detach(), f_h_burn)
+        feat_TBH, _ = self.net.feature_compute( obs_train, z_BH, f_h_burn)
         a_pi_TBA, logp_TB1 = self.net.action_compute( feat_TBH )
         
         # Alpha update
