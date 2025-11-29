@@ -114,7 +114,7 @@ def main():
         buffer_max=roll_cfg.get("buffer_max", 10_000_000),
         interference_vals = interference_vals,
         writer = writer,
-        capacity = 10000,
+        capacity = 10000 if args.batch_rl else 50 * 3000 // 600,
     )
 
     # Policy
