@@ -423,14 +423,8 @@ class SACRNNBeliefSeqDistV5(PolicyBase):
         
         ## Belief
         z_BH, _, mu_BH, logvar_BH = self.net.belief_encode(obs_train, b_h=h_burn)
-        y_hat_B1 = self.net.belief_decode( z_BH )
-        
-        b_loss, belief_stats = self._belief_loss( y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch )
-        self._step_with_clip( self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=None)
-        
         
         ## Alpha & Critic & Actor
-        z_BH, _, _, _ = self.net.belief_encode( obs_train, b_h=h_burn )
         feat_TBH, _ = self.net.feature_compute( obs_train, z_BH.detach(), f_h_burn)
         a_pi_TBA, logp_TB1 = self.net.action_compute( feat_TBH )
         
@@ -450,6 +444,10 @@ class SACRNNBeliefSeqDistV5(PolicyBase):
         with self.net.critics_frozen():
             a_loss, qmin_pi = self._actor_loss(feat_TBH, a_pi_TBA, logp_TB1)
             self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=None)
+
+        y_hat_B1 = self.net.belief_decode( z_BH )
+        b_loss, belief_stats = self._belief_loss( y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch )
+        self._step_with_clip( self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=None)
 
         # Logging
         if self._global_step % self.cfg.log_interval == 0:
