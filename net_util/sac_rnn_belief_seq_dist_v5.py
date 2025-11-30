@@ -467,12 +467,11 @@ class SACRNNBeliefSeqDistV5(PolicyBase):
             b_loss, belief_stats = self._belief_loss( y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch )
             self._step_with_clip( self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=5.0)
 
-        # Logging
-        if self._global_step % self.cfg.log_interval == 0:
-            self._log_batch_stats(writer, self._global_step, 
-                a_loss=a_loss, c_loss=c_loss, b_loss=b_loss, ent_loss=ent_loss, logp_TB1=logp_TB1, 
-                qmin_pi=qmin_pi, belief_stats=belief_stats, is_batch_rl=is_batch_rl
-            )
+            if self._global_step % self.cfg.log_interval == 0:
+                self._log_batch_stats(writer, self._global_step, 
+                    a_loss=a_loss, c_loss=c_loss, b_loss=b_loss, ent_loss=ent_loss, logp_TB1=logp_TB1, 
+                    qmin_pi=qmin_pi, belief_stats=belief_stats, is_batch_rl=is_batch_rl
+                )
             
         if self._global_step % (self.cfg.log_interval * 10) == 0:
             self._probe_z_ablation_feature(obs_train, h_burn, f_h_burn, writer, self._global_step)

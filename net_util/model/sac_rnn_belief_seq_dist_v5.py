@@ -200,7 +200,7 @@ class Network(nn.Module):
 
     @contextlib.contextmanager
     def critics_frozen(self):
-        ps = list(self.q1.parameters()) + list(self.q2.parameters()) 
+        ps = self.critic_parameters()
         flags = [p.requires_grad for p in ps]
         for p in ps: p.requires_grad_(False)
         try:
@@ -210,7 +210,7 @@ class Network(nn.Module):
 
     # param groups
     def actor_parameters(self):
-        return list(self.fe.parameters()) + list(self.mu.parameters()) + list(self.logstd_head.parameters())
+        return list(self.mu.parameters()) + list(self.logstd_head.parameters())
     
     def critic_parameters(self):
         return list(self.q1.parameters()) + list(self.q2.parameters()) + list(self.fe.parameters()) 
