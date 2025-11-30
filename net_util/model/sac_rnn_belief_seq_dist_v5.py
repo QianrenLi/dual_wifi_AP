@@ -35,8 +35,7 @@ class FeatureExtractorGRU(nn.Module):
 
 
 class Network(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, bins: int, hidden=128, belief_dim=1,
-                 init_log_std=-2.0, log_std_min=-20.0, log_std_max=2.0):
+    def __init__(self, obs_dim: int, act_dim: int, bins: int, hidden=128, belief_dim=1, belief_labels_dim=5, init_log_std=-2.0, log_std_min=-20.0, log_std_max=2.0):
         super().__init__()
         self.log_std_min, self.log_std_max = float(log_std_min), float(log_std_max)
         # Critics
@@ -58,7 +57,7 @@ class Network(nn.Module):
         )
         
         self.belief_decoder     = nn.Sequential(
-            nn.Linear(belief_dim, 1),
+            nn.Linear(belief_dim, belief_labels_dim),
         )
 
         self.q1, self.q2        = _make_q(), _make_q()
@@ -148,7 +147,9 @@ class Network(nn.Module):
         feat = feat / feat.norm(p=1, dim=-1, keepdim=True).clamp_min(1e-8)
         mean_action = self.mu(feat)
         # std = th.clamp(self.logstd_head, self.log_std_min, self.log_std_max).exp()
-        std = th.clamp(self.logstd_head(feat), self.log_std_min, self.log_std_max).exp()
+        # std = th.clamp(self.logstd_head(feat), self.log_std_min, self.log_std_max).exp()
+        logstd = self.logstd_head(feat)
+        std = 1e-3 + (1-1e-3) * F.sigmoid(logstd)
         
         dist = th.distributions.Normal(mean_action, std)
         

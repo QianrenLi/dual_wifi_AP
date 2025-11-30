@@ -182,8 +182,23 @@ class SACRNNBeliefSeqDistV5(PolicyBase):
         Compute belief loss (CrossEntropy over K classes + beta * KL).
         """
 
+        T, B, K = y_hat_TBK.shape
 
-        mse_loss = (y_hat_TBK - interf_B1).pow(2).mean()
+        # ------------------------------------------------------------------
+        # 1) Repeat interf_B1 over time so it matches [T, B, 1]
+        # ------------------------------------------------------------------
+        # interf_B1: [B, 1] -> [1, B, 1] -> [T, B, 1]
+        interf_TB1 = interf_B1.unsqueeze(0).expand(T, -1, -1)   # [T, B, 1]
+
+        # ------------------------------------------------------------------
+        # 2) Cross entropy loss over K classes
+        #    Assume interf_* stores class indices in [0, K-1].
+        # ------------------------------------------------------------------
+        logits = y_hat_TBK.view(T * B, K)                       # [T*B, K]
+        target = interf_TB1.squeeze(-1).long().view(T * B)      # [T*B]
+        
+        cross_entropy = F.cross_entropy(logits, target, reduction="mean")
+
 
         # ------------------------------------------------------------------
         # 3) KL term for the Gaussian latent
@@ -193,10 +208,10 @@ class SACRNNBeliefSeqDistV5(PolicyBase):
         
 
         beta = self._get_beta(epoch)
-        b_loss = mse_loss + beta * kl_loss
+        b_loss = cross_entropy + beta * kl_loss
 
         stats = {
-            "loss/CE": mse_loss.item(),
+            "loss/CE": cross_entropy.item(),
             "loss/KL": kl_loss.item(),
             "belief/beta": beta,
         }
@@ -475,7 +490,7 @@ class SACRNNBeliefSeqDistV5(PolicyBase):
 
         z_BH, _belief_h, _, _ = self.net.belief_encode(obs, self._belief_h, is_evaluate=is_evaluate)
         y_hat_B1 = self.net.belief_decode(z_BH)
-
+        belief = (F.softmax(y_hat_B1, dim=-1) * th.arange(y_hat_B1.shape[-1], device=self.device)).sum(dim=-1, keepdim=True)
 
         feat, _eval_h = self.net.feature_compute(obs, z_BH, self._eval_h)
         
@@ -489,8 +504,9 @@ class SACRNNBeliefSeqDistV5(PolicyBase):
             "action": action[0][0].cpu().numpy(),
             "log_prob": logp[0][0].cpu().numpy(),
             "value": v_like,
-            "belief": y_hat_B1[0][0].cpu().numpy(),
+            "belief": belief[0][0].cpu().numpy(),
         }
+
 
     def save(self, path: str):
         # ... (save logic is the same)
