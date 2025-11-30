@@ -200,7 +200,7 @@ class Network(nn.Module):
 
     @contextlib.contextmanager
     def critics_frozen(self):
-        ps = self.critic_parameters()
+        ps = list(self.q1.parameters()) + list(self.q2.parameters()) 
         flags = [p.requires_grad for p in ps]
         for p in ps: p.requires_grad_(False)
         try:
@@ -213,7 +213,7 @@ class Network(nn.Module):
         return list(self.fe.parameters()) + list(self.mu.parameters()) + list(self.logstd_head.parameters())
     
     def critic_parameters(self):
-        return list(self.q1.parameters()) + list(self.q2.parameters())
+        return list(self.q1.parameters()) + list(self.q2.parameters()) + list(self.fe.parameters()) 
     
     def belief_parameters(self):
         return list(self.belief_encoder_gru.parameters()) + list(self.belief_encoder_mu.parameters()) + list(self.belief_encoder_log_std.parameters()) + list(self.belief_decoder.parameters())

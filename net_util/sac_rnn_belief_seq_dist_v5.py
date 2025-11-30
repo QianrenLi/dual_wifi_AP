@@ -446,23 +446,26 @@ class SACRNNBeliefSeqDistV5(PolicyBase):
         # Alpha update
         if self.alpha_opt is not None:
             ent_loss = self._alpha_loss(logp_TB1)
-            self._step_with_clip( [self.log_alpha], self.alpha_opt, ent_loss, clip_norm=None ) # type: ignore
+            self._step_with_clip( [self.log_alpha], self.alpha_opt, ent_loss, clip_norm=5.0 ) # type: ignore
         
         # Critic update
         c_loss, c_loss_batch = self._critic_loss(
-            feat_TBH.detach(), act_train, nxt_train, rew_train, done_train, importance_weights, b_h=h_burn, f_h=f_h_burn
+            feat_TBH, act_train, nxt_train, rew_train, done_train, importance_weights, b_h=h_burn, f_h=f_h_burn
         )
-        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=None)
+        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=5.0)
         self.net.soft_sync(self.cfg.tau)
 
         # Actor update
+        feat_TBH, _ = self.net.feature_compute( obs_train, z_BH.detach(), f_h_burn)
+        a_pi_TBA, logp_TB1 = self.net.action_compute( feat_TBH )
         with self.net.critics_frozen():
             a_loss, qmin_pi = self._actor_loss(feat_TBH, a_pi_TBA, logp_TB1)
-            self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=None)
+            self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=5.0)
 
-        y_hat_B1 = self.net.belief_decode( z_BH )
-        b_loss, belief_stats = self._belief_loss( y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch )
-        self._step_with_clip( self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=None)
+        if self._global_step % 5 == 0:
+            y_hat_B1 = self.net.belief_decode( z_BH )
+            b_loss, belief_stats = self._belief_loss( y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch )
+            self._step_with_clip( self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=5.0)
 
         # Logging
         if self._global_step % self.cfg.log_interval == 0:
