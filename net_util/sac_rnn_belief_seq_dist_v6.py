@@ -107,9 +107,7 @@ class SACRNNBeliefSeqDistV6(PolicyBase):
         self.target_entropy: float | None = None
         if cfg.ent_coef == "auto" and not cfg.batch_rl:
             self.log_alpha = th.tensor([cfg.ent_coef_init], device=self.device).log().requires_grad_(True)
-            self.alpha_opt = th.optim.Adam([self.log_alpha], lr=1e-4)
-            self.alpha_min = 1e-3
-            self.alpha_max = 5e-2
+            self.alpha_opt = th.optim.Adam([self.log_alpha], lr=cfg.lr * 10)
             self.target_entropy = -float(cfg.act_dim) if cfg.target_entropy == "auto" else float(cfg.target_entropy)
         else:
             alpha_val = float(cfg.ent_coef) if isinstance(cfg.ent_coef, float) else 0.2
@@ -127,7 +125,7 @@ class SACRNNBeliefSeqDistV6(PolicyBase):
         """Current temperature α as a detached tensor."""
         if self.log_alpha is not None:
             alpha = self.log_alpha.exp()
-            return alpha.clamp(self.alpha_min, self.alpha_max).detach()
+            return alpha.detach()
         else:
             return self.alpha_tensor.detach()
 
