@@ -29,7 +29,7 @@ def _flatten_params(m: Optional[th.nn.Module]) -> th.Tensor:
 
 @register_policy_cfg
 @dataclass
-class SACRNNBeliefSeqDistV7_Config:
+class SACRNNBeliefSeqDistV6_Config:
     # Core RL Parameters
     batch_size: int = 256
     learning_starts: int = 2_000
@@ -75,10 +75,10 @@ class SACRNNBeliefSeqDistV7_Config:
 
 
 @register_policy
-class SACRNNBeliefSeqDistV7(PolicyBase):
+class SACRNNBeliefSeqDistV6(PolicyBase):
     """Refactored Soft Actor-Critic (SAC) with RNN and Learned Belief State."""
 
-    def __init__(self, cmd_cls: Any, cfg: SACRNNBeliefSeqDistV7_Config, rollout_buffer: RNNPriReplayBuffer2 | None = None, device: str | None = None, state_transform_dict: dict | None = None, reward_cfg: Optional[dict] = None):
+    def __init__(self, cmd_cls: Any, cfg: SACRNNBeliefSeqDistV6_Config, rollout_buffer: RNNPriReplayBuffer2 | None = None, device: str | None = None, state_transform_dict: dict | None = None, reward_cfg: Optional[dict] = None):
         super().__init__(cmd_cls, state_transform_dict=state_transform_dict, reward_cfg=reward_cfg)
         
         self.cfg = cfg
@@ -273,26 +273,20 @@ class SACRNNBeliefSeqDistV7(PolicyBase):
     def _actor_loss(self, feat_TBH: Tensor, a_pi_TBA: Tensor, logp_TB1: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         alpha = self._alpha()
         q1_pi, q2_pi = self.net.critic_compute(feat_TBH, a_pi_TBA)
-        qmin_dist = th.minimum(q1_pi, q2_pi)
-        q_val = self.vd.mean_value(qmin_dist)
+        # qmin_dist = th.minimum(q1_pi, q2_pi)
+        qdist_avg = q1_pi.mean(dim=(0, 1)).detach()
+        q_val = th.min(self.vd.mean_value(q1_pi), self.vd.mean_value(q2_pi))
         a_loss = (alpha * logp_TB1 - q_val).mean()
-        qdist_avg = qmin_dist.mean(dim=(0, 1)).detach()
         return a_loss, q_val.detach(), qdist_avg
-
 
 
     def _alpha_loss(self, logp_TB1: Tensor) -> Tensor:
         """Entropy temperature loss (0 if ent_coef is fixed)."""
-        obs_init = self.buf.sample_initial_states(self.cfg.batch_size)
-        ## Belief
-        with th.no_grad():
-            z_BH, _, mu_BH, logvar_BH = self.net.belief_encode(obs_init, is_evaluate=True)
-            feat_TBH, _ = self.net.feature_compute(obs_init, z_BH.detach())
-            a_pi_TBA, logp_TB1, mu_TBA, std_TBA = self.net.action_compute(feat_TBH, return_stats=True, is_evaluate=True)
-            _, qmin_pi, _ = self._actor_loss(feat_TBH, a_pi_TBA, logp_TB1)
+        if self.alpha_opt is None or self.log_alpha is None:
+            return th.zeros((), device=self.device)
+        # logp is detached to prevent backprop into actor
+        return -(self.log_alpha * (logp_TB1.detach() + self.target_entropy)).mean() # type: ignore
 
-        alpha = self.log_alpha.exp()
-        return alpha * logp_TB1.detach().mean() - qmin_pi.detach().mean()
 
     ### Probe
     @th.no_grad()
@@ -469,11 +463,18 @@ class SACRNNBeliefSeqDistV7(PolicyBase):
         
         ## Alpha & Critic & Actor
         feat_TBH, _ = self.net.feature_compute( obs_train, z_BH.detach(), f_h_burn)
+        a_pi_TBA, logp_TB1 = self.net.action_compute( feat_TBH )
+        
+        # Alpha update
+        if self.alpha_opt is not None and self._global_step % 5 == 0:
+            ent_loss = self._alpha_loss(logp_TB1)
+            self._step_with_clip( [self.log_alpha], self.alpha_opt, ent_loss, clip_norm=5.0 ) # type: ignore
+        
         # Critic update
         c_loss, c_loss_batch = self._critic_loss(
             feat_TBH, act_train, nxt_train, rew_train, done_train, importance_weights, b_h=h_burn, f_h=f_h_burn
         )
-        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=5.0)
+        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=10.0)
         self.net.soft_sync(self.cfg.tau)
 
         # Actor update
@@ -489,11 +490,6 @@ class SACRNNBeliefSeqDistV7(PolicyBase):
             sigma_std = std_TBA.std(dim=(0, 1))
             act_mean = a_pi_TBA.mean(dim=(0, 1))
             act_std = a_pi_TBA.std(dim=(0, 1))
-            
-        # Alpha update
-        if self.alpha_opt is not None:
-            ent_loss = self._alpha_loss(logp_TB1)
-            self._step_with_clip( [self.log_alpha], self.alpha_opt, ent_loss, clip_norm=5.0 ) # type: ignore
 
         if self._global_step % 5 == 0:
             y_hat_B1 = self.net.belief_decode( z_BH )
