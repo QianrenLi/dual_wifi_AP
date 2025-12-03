@@ -223,6 +223,36 @@ class ValueDistribution:
             weights = seg / denom
 
             return float(np.sum(weights * v))
+        
+    def mean_minus_k_sigma(self, value_distribution, k: float):
+        if isinstance(value_distribution, th.Tensor):
+            probs = value_distribution
+            v = self._value_bins_tensor(
+                device=probs.device,
+                dtype=probs.dtype,
+            )
+            v2 = v * v
+
+            mean = (probs * v).sum(dim=-1, keepdim=True)
+            second_moment = (probs * v2).sum(dim=-1, keepdim=True)
+            var = (second_moment - mean.pow(2)).clamp_min(1e-6)
+            std = var.sqrt()
+
+            k_t = th.as_tensor(k, device=probs.device, dtype=probs.dtype)
+            return mean - k_t * std
+
+        else:
+            probs = np.asarray(value_distribution, dtype=np.float64)
+            v = np.asarray(self.value_bins, dtype=np.float64)
+            v2 = v * v
+
+            mean = float(np.sum(probs * v))
+            second_moment = float(np.sum(probs * v2))
+            var = max(second_moment - mean * mean, 0.0)
+            std = float(np.sqrt(var))
+
+            return mean - k * std
+        
 
     def get_bin_value(self) -> list:
         bin_values = []
