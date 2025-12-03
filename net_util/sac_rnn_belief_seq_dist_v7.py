@@ -29,7 +29,7 @@ def _flatten_params(m: Optional[th.nn.Module]) -> th.Tensor:
 
 @register_policy_cfg
 @dataclass
-class SACRNNBeliefSeqDistV6_Config:
+class SACRNNBeliefSeqDistV7_Config:
     # Core RL Parameters
     batch_size: int = 256
     learning_starts: int = 2_000
@@ -75,10 +75,10 @@ class SACRNNBeliefSeqDistV6_Config:
 
 
 @register_policy
-class SACRNNBeliefSeqDistV6(PolicyBase):
+class SACRNNBeliefSeqDistV7(PolicyBase):
     """Refactored Soft Actor-Critic (SAC) with RNN and Learned Belief State."""
 
-    def __init__(self, cmd_cls: Any, cfg: SACRNNBeliefSeqDistV6_Config, rollout_buffer: RNNPriReplayBuffer2 | None = None, device: str | None = None, state_transform_dict: dict | None = None, reward_cfg: Optional[dict] = None):
+    def __init__(self, cmd_cls: Any, cfg: SACRNNBeliefSeqDistV7_Config, rollout_buffer: RNNPriReplayBuffer2 | None = None, device: str | None = None, state_transform_dict: dict | None = None, reward_cfg: Optional[dict] = None):
         super().__init__(cmd_cls, state_transform_dict=state_transform_dict, reward_cfg=reward_cfg)
         
         self.cfg = cfg
