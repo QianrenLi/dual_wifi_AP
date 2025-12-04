@@ -278,7 +278,7 @@ class SACRNNBeliefSeqDistV9(PolicyBase):
         q1_pi, q2_pi = self.net.critic_compute(feat_TBH, a_pi_TBA)
         # qmin_dist = th.minimum(q1_pi, q2_pi)
         qdist_avg = q1_pi.mean(dim=(0, 1)).detach()
-        q_val = th.min(self.vd.mean_minus_k_sigma(q1_pi, self.cfg.sigma_k), self.vd.mean_value(q2_pi, self.cfg.sigma_k))
+        q_val = th.min(self.vd.mean_value(q1_pi, q_low=0.0, q_high=0.3), self.vd.mean_value(q2_pi, q_low=0.0, q_high=0.3))
         a_loss = (alpha * logp_TB1 - q_val).mean()
         return a_loss, q_val.detach(), qdist_avg
 
