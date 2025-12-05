@@ -46,7 +46,7 @@ def bitrate_delta(value: Any, alpha: float = 1.0, beta: float = 0.0, offset = 0.
 @register_filter
 def stat_bitrate(value: Any, alpha: float = 1e-6):
     """
-    Compute zeta * outage_rate. Works for scalar or dict-of-scalars.
+    Compute alpha * bitrate . Works for scalar or dict-of-scalars.
     """
     if _is_num(value):
         return alpha * float(value)

@@ -354,8 +354,8 @@ def trace_collec(
 
     states = states[:-1]
     actions = actions[:-1]
-    rewards = rewards[1:]
     network_output = network_output[:-1]
+    rewards = rewards[1:]
     
     return states, actions, rewards, network_output
 
@@ -369,54 +369,61 @@ if __name__ == "__main__":
         
         "app_buff":    { "rule": True, "from": "app_buff", "pos": "flow" },
         "frame_count": { "rule": True, "from": "frame_count", "pos": "flow" },
-        
+        "left_frame":  { "rule": True, "from": "left_frame", "pos": "flow" },
+            
         "bitrate": {
             "rule": True,
             "from": "bitrate",
             "pos": "flow"
         },
-        "outage_rate": { "rule": True, "from": "outage_rate", "pos": "flow" }
+        "outage_rate": { "rule": True, "from": "outage_rate", "pos": "flow" },
+        
+        "acc_bitrate": { "rule": True, "from": "acc_bitrate", "pos": "flow" },
+        "diff_bitrate": { "rule": True, "from": "diff_bitrate", "pos": "flow" }
     }
     
     REWARD_DESCRIPTOR = {
-        "bitrate": {
-            "rule": "bitrate_delta",
-            "from": "bitrate",                 # bare key -> flow["bitrate"]
-            "args": {"alpha": 1e-6, "beta": -1e-6 / 2},
+        "acc_bitrate": {
+            "rule": "stat_bitrate",
+            "from": "acc_bitrate",                 # bare key -> flow["bitrate"]
+            "args": {"alpha": 1e-6 / 5},
+            "pos": "flow",
+        },
+        "diff_bitrate": {
+            "rule": "stat_bitrate",
+            "from": "diff_bitrate",               # bare key -> flow["bitrate"]
+            "args": {"alpha": -1e-6 / 2 / 5}, 
             "pos": "flow",
         },
         "outage_rate": {
             "rule": "scale_outage",
             "from": "outage_rate",             # bare key -> flow["outage_rate"]
-            "args": {"zeta": -1e3},
+            "args": {"zeta": -50 / 5 },
             "pos": "flow",
         }
     }
     
-    s, a, r, n = trace_collec( '/home/qianren/workspace/dual_wifi_AP/exp_trace/rnn_1500_day/IL_0_trial_20251114-103432/rollout.jsonl' ,state_descriptor=STATE_DESCRIPTOR, reward_descriptor=REWARD_DESCRIPTOR)
-    print(s[0])
-    print(len(s[0]))
+    
+    
+    # s, a, r, n = trace_collec( '/home/qianren/workspace/dual_wifi_AP/exp_trace/rnn_1500_day/IL_0_trial_20251114-103432/rollout.jsonl' ,state_descriptor=STATE_DESCRIPTOR, reward_descriptor=REWARD_DESCRIPTOR)
+    # print(s[0])
+    # print(len(s[0]))
     
     # python compute_normalization.py --control_config net_util/net_config/rnn_1500_day/test.json --trace_path exp_trace/rnn_1500_day
     
     #################
-    # example_js_str = '''
-    # {"t": 1760702113.036341, "iteration": 0, "links": ["6203@128"], "action": {"6203@128": {"__class__": "ControlCmd", "__data__": {"policy_parameters": {"__class__": "C_LIST_FLOAT_DIM4_0_500", "__data__": [16.354024410247803, 40.01936316490173, 498.2471615076065, 107.10836946964264]}, "version": {"__class__": "C_INT_RANGE_0_13", "__data__": 11}}}}, "stats": {"flow_stat": {"6203@128": {"rtt": 0.0048943062623341875, "outage_rate": 0.004726814726988474, "throughput": 7.396829444090822, "throttle": 0.0, "bitrate": 2000000, "app_buff": 0, "frame_count": 0}}, "device_stat": {"taken_at": {"secs_since_epoch": 1760702113, "nanos_since_epoch": 30374143}, "queues": {"192.168.3.25": {"1": 3, "0": 0, "2": 0}, "192.168.3.35": {"0": 0, "1": 0, "2": 0}}, "link": {"192.168.3.35": {"bssid": "82:19:55:0e:6f:52", "ssid": "HUAWEI-Dual-AP_5G", "freq_mhz": 5745, "signal_dbm": -50, "tx_mbit_s": 867.0}, "192.168.3.25": {"bssid": "82:19:55:0e:6f:4e", "ssid": "HUAWEI-Dual-AP", "freq_mhz": 2462, "signal_dbm": -57, "tx_mbit_s": 174.0}}}}, "timed_out": false, "policy": "SAC"}
-    # '''
-    
-    # example_js_str2 = '''
-    # {"t": 1761277795.030716, "iteration": 0, "links": ["6203@128"], "action": {"6203@128": {"__class__": "ControlCmd", "__data__": {"policy_parameters": {"__class__": "C_LIST_FLOAT_DIM4_0_500", "__data__": [88.70816230773926, 127.9095932841301, 417.9060161113739, 55.10172247886658]}, "version": {"__class__": "C_INT_RANGE_0_13", "__data__": 0}}}}, "stats": {"flow_stat": {"6203@128": {"rtt": 0.007164112726847331, "outage_rate": 0.03623351256052653, "throughput": 7.755874960544397, "throttle": 0.0, "bitrate": 2000000, "app_buff": 0, "frame_count": 0}}, "device_stat": {"taken_at": {"secs_since_epoch": 1761277795, "nanos_since_epoch": 20123220}, "queues": {"192.168.3.25": {"2": 0, "0": 0, "1": 0}, "192.168.3.35": {"1": 0, "0": 0}}, "link": {"192.168.3.25": {"bssid": "82:19:55:0e:6f:4e", "ssid": "HUAWEI-Dual-AP", "freq_mhz": 2462, "signal_dbm": -58, "tx_mbit_s": 174.0}, "192.168.3.35": {"bssid": "82:19:55:0e:6f:52", "ssid": "HUAWEI-Dual-AP_5G", "freq_mhz": 5745, "signal_dbm": -49, "tx_mbit_s": 867.0}}}}, "timed_out": false, "res": {"action": [-0.645167350769043, -0.4883616268634796, 0.6716240644454956, -0.7795931100845337, -0.9776695370674133], "log_prob": [-21.53298568725586], "value": 0}, "policy": "SACRNNBelief"}
-    # '''
-    
-    # example_js_str3 = '''
-    # {"t": 1760690575.639269, "iteration": 2, "links": ["6203@128"], "action": {"6203@128": {"__class__": "ControlCmd", "__data__": {"policy_parameters": {"__class__": "C_LIST_FLOAT_DIM4_0_500", "__data__": [441.0734474658966, 57.915568351745605, 17.910495400428772, 477.911114692688]}, "version": {"__class__": "C_INT_RANGE_0_13", "__data__": 12}}}}, "stats": {"flow_stat": {"6203@128": {"rtt": 0.004517078399658203, "outage_rate": 0.0, "throughput": 7.753064995008742, "throttle": 0.0, "bitrate": 2000000, "app_buff": 0, "frame_count": 0}}, "device_stat": {"taken_at": {"secs_since_epoch": 1760690575, "nanos_since_epoch": 638260169}, "queues": {"192.168.3.35": {"1": 0, "0": 0, "2": 0}, "192.168.3.25": {"2": 0, "0": 0, "1": 0}}, "link": {"192.168.3.25": {"bssid": "82:19:55:0e:6f:4e", "ssid": "HUAWEI-Dual-AP", "freq_mhz": 2462, "signal_dbm": -58, "tx_mbit_s": 174.0}, "192.168.3.35": {"bssid": "82:19:55:0e:6f:52", "ssid": "HUAWEI-Dual-AP_5G", "freq_mhz": 5745, "signal_dbm": -50, "tx_mbit_s": 867.0}}}}, "timed_out": false, "res": {"action": [0.7642937898635864, -0.7683377265930176, -0.9283580183982849, 0.911644458770752, 0.8903278708457947], "log_prob": [-16.09775161743164], "value": 0}, "policy": "SAC"}
-    # '''
-    
+    example_js_str = '''
+{"t": 1764925932.6989014, "iteration": 0, "links": ["6203@128"], "action": {"6203@128": {"__class__": "ControlCmd", "__data__": {"policy_parameters": {"__class__": "C_LIST_FLOAT_DIM1_0_1", "__data__": [0.0, 0.0, 0.0, 0.006987065076828003]}, "version": {"__class__": "C_INT_RANGE_0_13", "__data__": 12}}}}, "stats": {"flow_stat": {"6203@128": {"rtt": 0.0025925318400065104, "outage_rate": 0.0, "throughput": 2.31693872149037, "throttle": 0.0, "bitrate": 2000000, "acc_bitrate": 2000000, "diff_bitrate": 0, "app_buff": 1, "frame_count": 2, "left_frame": 47}}, "device_stat": {"taken_at": {"secs_since_epoch": 1764925932, "nanos_since_epoch": 694822594}, "queues": {"192.168.3.35": {"1": 0, "2": 0, "0": 0}, "192.168.3.25": {"0": 0, "2": 0}}, "link": {"192.168.3.35": {"bssid": "82:19:55:0e:6f:52", "ssid": "HUAWEI-Dual-AP_5G", "freq_mhz": 5220, "signal_dbm": -32, "tx_mbit_s": 867.0}, "192.168.3.25": {"bssid": "82:19:55:0e:6f:4e", "ssid": "HUAWEI-Dual-AP", "freq_mhz": 2462, "signal_dbm": -38, "tx_mbit_s": 174.0}}}}, "timed_out": false, "res": {"action": [-0.986025869846344, 0.9945688843727112], "log_prob": [7.842179775238037], "value": 0, "belief": [0.9139199256896973]}, "policy": "SACRNNBeliefSeqDistV9"}
+    '''
+    example_js_str_2 = '''
+    {"t": 1764925932.7029114, "iteration": 1, "links": ["6203@128"], "action": {"6203@128": {"__class__": "ControlCmd", "__data__": {"policy_parameters": {"__class__": "C_LIST_FLOAT_DIM1_0_1", "__data__": [0.0, 0.0, 0.0, 0.03185001015663147]}, "version": {"__class__": "C_INT_RANGE_0_13", "__data__": 12}}}}, "stats": {"flow_stat": {"6203@128": {"rtt": 0.0, "outage_rate": 0.0, "throughput": 2.31693872149037, "throttle": 0.0, "bitrate": 2000000, "acc_bitrate": 0, "diff_bitrate": 0, "app_buff": 0, "frame_count": 0, "left_frame": 47}}, "device_stat": {"taken_at": {"secs_since_epoch": 1764925932, "nanos_since_epoch": 700517411}, "queues": {"192.168.3.35": {"1": 0, "2": 0, "0": 0}, "192.168.3.25": {"0": 0, "2": 0}}, "link": {"192.168.3.35": {"bssid": "82:19:55:0e:6f:52", "ssid": "HUAWEI-Dual-AP_5G", "freq_mhz": 5220, "signal_dbm": -32, "tx_mbit_s": 867.0}, "192.168.3.25": {"bssid": "82:19:55:0e:6f:4e", "ssid": "HUAWEI-Dual-AP", "freq_mhz": 2462, "signal_dbm": -38, "tx_mbit_s": 174.0}}}}, "timed_out": false, "res": {"action": [-0.9362999796867371, 0.8775613307952881], "log_prob": [1.0470383167266846], "value": 0, "belief": [0.9304964542388916]}, "policy": "SACRNNBeliefSeqDistV9"}
+    '''
     
     
     ###################
-    # print(trace_filter(json.loads(example_js_str2.replace("'", '"')), STATE_DESCRIPTOR))
-    # print(flatten_leaves(trace_filter(json.loads(example_js_str2.replace("'", '"')), STATE_DESCRIPTOR)))
+    print(trace_filter(json.loads(example_js_str.replace("'", '"')), STATE_DESCRIPTOR))
+    print(flatten_leaves(trace_filter(json.loads(example_js_str.replace("'", '"')), STATE_DESCRIPTOR)))
+    print(flatten_leaves(trace_filter(json.loads(example_js_str.replace("'", '"')), REWARD_DESCRIPTOR)))
     # print(trace_filter(json.loads(example_js_str3.replace("'", '"')), STATE_DESCRIPTOR))
     # print(flatten_leaves(trace_filter(json.loads(example_js_str3.replace("'", '"')), STATE_DESCRIPTOR)))
     
@@ -427,50 +434,57 @@ if __name__ == "__main__":
 
 
     #########
-    # STATE_TRANSFORM = {'created_at': '2025-10-24 11:38:28',
-    # 'dim': 18,
-    # 'meta': {'control_config': '/home/qianren/workspace/dual_wifi_AP/net_util/net_config/test_rnn_2/test.json',
-    #         'trace_path': '/home/qianren/workspace/dual_wifi_AP/exp_trace/rnn_with_action_6'},
-    # 'state': {'mean': [-50.27593994140625,
-    #                     -46.48292922973633,
-    #                     174.0,
-    #                     867.3209838867188,
-    #                     4.0849151611328125,
-    #                     0.267588347196579,
-    #                     10.705779075622559,
-    #                     2.6557774543762207,
-    #                     0.12260079383850098,
-    #                     0.008945656009018421,
-    #                     0.17679531872272491,
-    #                     0.15164856612682343,
-    #                     0.2003059834241867,
-    #                     0.08657657355070114,
-    #                     0.18314214050769806,
-    #                     -0.251435250043869,
-    #                     10.657567024230957,
-    #                     -176.79562377929688],
-    #         'std': [3.0946998596191406,
-    #                 1.9665738344192505,
-    #                 1.0,
-    #                 0.3209788501262665,
-    #                 11.010217666625977,
-    #                 1.86485755443573,
-    #                 5.39185905456543,
-    #                 39.406288146972656,
-    #                 1.7903532981872559,
-    #                 0.0380171500146389,
-    #                 2.320098400115967,
-    #                 0.44983887672424316,
-    #                 0.43279579281806946,
-    #                 0.4425421953201294,
-    #                 0.44718658924102783,
-    #                 0.43000489473342896,
-    #                 5.411613941192627,
-    #                 2320.3095703125]}}
+    STATE_TRANSFORM = {'created_at': '2025-11-14 15:14:42',
+    'dim': 13,
+    'meta': {'control_config': '/home/qianren/workspace/dual_wifi_AP/net_util/net_config/rnn_1500_day/test.json',
+            'trace_path': '/home/qianren/workspace/dual_wifi_AP/exp_trace/rnn_1500_day'},
+    'state': {'mean': [-38.76929473876953,
+                        -30.3992862701416,
+                        175.18724060058594,
+                        864.6111450195312,
+                        1.1262472867965698,
+                        2.1851847171783447,
+                        0.23867054283618927,
+                        0.008045737631618977,
+                        30,
+                        19276342.0,
+                        0.12414762377738953,
+                        19276342.0,
+                        19276342.0,
+                        0.0,
+                        0.0],
+            'std': [1.9944250583648682,
+                    3.2788290977478027,
+                    1.1888312101364136,
+                    2.3938241004943848,
+                    5.041040420532227,
+                    7.8146562576293945,
+                    5.00417423248291,
+                    0.09046436846256256,
+                    3.46,
+                    9105042.0,
+                    7.309142112731934,
+                    9105042.0,
+                    9105042.0,
+                    1.0,
+                    1.0]}}
 
 
-    # from net_util.state_transfom import _StateTransform
-    # _state_tf = _StateTransform.from_obj(STATE_TRANSFORM)
+
+    from net_util.state_transfom import _StateTransform
+    import time
+    _state_tf = _StateTransform.from_obj(STATE_TRANSFORM)
     
-    # print(_state_tf.apply_to_list(flatten_leaves(trace_filter(json.loads(example_js_str3.replace("'", '"')), STATE_DESCRIPTOR))))
+    start_time = time.time()
+    jss = [json.loads(example_js_str.replace("'", '"')), json.loads(example_js_str_2.replace("'", '"'))]
+    state_value = create_obss(
+        states=[flatten_leaves(trace_filter(t, STATE_DESCRIPTOR)) for t in jss],
+        actions=[flatten_leaves(t.get("res").get("action")) for t in jss],
+        rewards=[flatten_leaves(trace_filter(t, REWARD_DESCRIPTOR)) for t in jss],
+    )
+    print(state_value[0])
+    print(_state_tf.apply_to_list(state_value[0]))
+    print(state_value[1])
+    print(_state_tf.apply_to_list(state_value[1]))
+    print("time cost:", time.time() - start_time)
     
