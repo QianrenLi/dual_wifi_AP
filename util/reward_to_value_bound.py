@@ -262,33 +262,25 @@ class ValueDistribution:
         return bin_values
 
     def get_bound(self, reward_cfg, gamma, scale) -> tuple:
-        """
-        Calculate the value function bounds based on reward configuration.
-        """
-        MAX_BITRATE = 3e7  # 30 Mbps
-        MAX_OUTAGE = 1.0   # 100% outage
-        max_bound = 0.0
-        min_bound = 0.0
+        MAX_BITRATE, MAX_OUTAGE = 3e7, 1.0
 
-        # Handle bitrate
-        entry = reward_cfg.get("bitrate", {})
-        if entry:  # avoid `is not {}` bug
-            rule = entry.get("rule", True)
-            args = entry.get("args")
-            bitrate_bound = _apply_rule(MAX_BITRATE, rule, args)
-            max_bound = bitrate_bound / (1 - gamma)
+        def cfg_bound(key: str, base: float) -> float:
+            entry = reward_cfg.get(key)
+            if not entry:
+                return 0.0
+            return _apply_rule(base, entry.get("rule", True), entry.get("args"))
 
-        # Handle outage
-        entry = reward_cfg.get("outage_rate", {})
-        if entry:
-            rule = entry.get("rule", True)
-            args = entry.get("args")
-            outage_bound = _apply_rule(MAX_OUTAGE, rule, args)
-            min_bound = outage_bound / (1 - gamma)
+        bitrate_bound = cfg_bound("acc_bitrate", MAX_BITRATE)
+        outage_bound = cfg_bound("outage_rate", MAX_OUTAGE)
+        bitrate_change_bound = cfg_bound("diff_bitrate", MAX_BITRATE) if outage_bound else 0.0
+
+        max_bound = bitrate_bound / (1 - gamma) if bitrate_bound else 0.0
+        min_bound = (outage_bound + bitrate_change_bound) / (1 - gamma) if outage_bound else 0.0
 
         span = max_bound - min_bound
-        mean = (min_bound + max_bound) / 2.0
-        return (mean - span * scale / 2.0, mean + span * scale / 2.0)
+        mean = 0.5 * (min_bound + max_bound)
+        return mean - span * scale / 2.0, mean + span * scale / 2.0
+    
 
 if __name__ == "__main__":
     REWARD_DESCRIPTOR = {
