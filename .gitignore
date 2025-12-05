@@ -6,7 +6,9 @@ net_util/net_cp/*
 
 exp_trace/*.png
 plots/*.png
+plots/*.pdf
 
 __pycache__/
 logs/
+bk_logs/
 
