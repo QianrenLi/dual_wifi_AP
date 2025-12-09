@@ -100,42 +100,37 @@ class Episode:
 # ---------------- rank-based PER with array-based binary heap ----------------
 @register_buffer
 class RNNPriReplayEqualEp:
-    """
-    Array-based max-heap keyed by priority (episode.loss).
-    - Sampling uses heap array index as an approximate rank (no full sort).
-    - Periodic full sort & rebuild to keep the heap “not too unbalanced”, per paper.
-    - Evict a random leaf when at capacity (approx low-priority).
-    """
-    def __init__(self,
-                 device: str = "cuda",
-                 capacity: int = 10000,
-                 gamma: float = 0.99,
-                 alpha: float = 0.7,     # rank-prioritization exponent
-                 beta0: float = 0.4,     # IS exponent (you can anneal toward 1.0)
-                 rebalance_interval: int = 100,   # infrequent sort+rebuild
-                 writer=None,
-                 episode_length: int = 600):
+    def __init__(
+        self,
+        device: str = "cuda",
+        capacity: int = 10000,
+        gamma: float = 0.99,
+        alpha: float = 0.7,
+        beta0: float = 0.4,
+        rebalance_interval: int = 100,
+        writer=None,
+        episode_length: int = 600,
+    ):
         self.device = th.device(device)
         self.capacity = int(capacity)
         self.gamma = float(gamma)
         self.alpha = float(alpha)
-        self.beta  = float(beta0)
+        self.beta = float(beta0)
         self.rebalance_interval = int(rebalance_interval)
         self.writer = writer
-        self.episode_length = episode_length  # Added episode length
-        
-        self.heap: List[Episode] = []       # max-heap on .loss
+        self.episode_length = episode_length
+
+        self.heap: List[Episode] = []
+        self._fifo: List[Episode] = []
         self._steps_since_rebalance = 0
 
-        # stats you tracked
-        self.reward_summary = (0,0.0,0.0)
-        self.gamma_summary  = (0,0.0,0.0)
+        self.reward_summary = (0, 0.0, 0.0)
+        self.gamma_summary = (0, 0.0, 0.0)
         self.avg_return = 0.0
         self.run_return = 0.0
         self.data_num = 0
         self.sigma = 0.0
 
-    # ... heap utilities (_key, _swap, _sift_up, _sift_down, _push, _remove_at, _update_key, _evict_leaf, _rebalance_if_needed) remain largely unchanged ...
     def _key(self, ep: Episode) -> float:
         return ep.loss
 
@@ -147,7 +142,8 @@ class RNNPriReplayEqualEp:
     def _sift_up(self, i: int):
         while i > 0:
             p = (i - 1) >> 1
-            if self._key(self.heap[p]) >= self._key(self.heap[i]): break
+            if self._key(self.heap[p]) >= self._key(self.heap[i]):
+                break
             self._swap(i, p)
             i = p
 
@@ -161,28 +157,35 @@ class RNNPriReplayEqualEp:
                 largest = l
             if r < n and self._key(self.heap[r]) > self._key(self.heap[largest]):
                 largest = r
-            if largest == i: break
+            if largest == i:
+                break
             self._swap(i, largest)
             i = largest
 
     def _push(self, ep: Episode):
         ep._heap_idx = len(self.heap)
         self.heap.append(ep)
+        self._fifo.append(ep)
         self._sift_up(ep._heap_idx)
 
     def _remove_at(self, i: int):
         n = len(self.heap)
-        if i < 0 or i >= n: return
+        if i < 0 or i >= n:
+            return
         last = n - 1
         if i != last:
             self._swap(i, last)
         ep = self.heap.pop()
         ep._heap_idx = -1
+        if ep in self._fifo:
+            self._fifo.remove(ep)
         if i < len(self.heap):
-            self._sift_down(i); self._sift_up(i)
+            self._sift_down(i)
+            self._sift_up(i)
 
     def _update_key(self, ep_idx: int, new_loss: float):
-        if ep_idx < 0 or ep_idx >= len(self.heap): return
+        if ep_idx < 0 or ep_idx >= len(self.heap):
+            return
         ep = self.heap[ep_idx]
         old = ep.loss
         ep.loss = float(new_loss)
@@ -192,11 +195,12 @@ class RNNPriReplayEqualEp:
             self._sift_down(ep_idx)
 
     def _evict_leaf(self):
-        n = len(self.heap)
-        if n == 0: return
-        leaf_start = n >> 1
-        idx = random.randint(leaf_start, n - 1)
-        self._remove_at(idx)
+        while self._fifo:
+            ep = self._fifo.pop(0)
+            idx = ep._heap_idx
+            if idx != -1:
+                self._remove_at(idx)
+                return
 
     def _rebalance_if_needed(self, just_updated: int = 1):
         self._steps_since_rebalance += max(1, int(just_updated))
@@ -207,48 +211,89 @@ class RNNPriReplayEqualEp:
                 ep._heap_idx = i
             for i in range((len(self.heap) >> 1) - 1, -1, -1):
                 self._sift_down(i)
-                
-    # ---------------- construction / add / extend ----------------
+
     @staticmethod
-    def build_from_traces(traces, device="cuda", reward_agg="sum", capacity=10000,
-                          init_loss: Optional[float] = None, episode_length=600, **kwargs):
+    def build_from_traces(
+        traces,
+        device="cuda",
+        reward_agg="sum",
+        capacity=10000,
+        init_loss: Optional[float] = None,
+        episode_length=600,
+        **kwargs,
+    ):
         buf = RNNPriReplayEqualEp(
-            device=device, capacity=capacity, gamma=kwargs.get("gamma", 0.99),
-            alpha=kwargs.get("alpha", 0.7), beta0=kwargs.get("beta0", 0.4),
+            device=device,
+            capacity=capacity,
+            gamma=kwargs.get("gamma", 0.99),
+            alpha=kwargs.get("alpha", 0.7),
+            beta0=kwargs.get("beta0", 0.4),
             rebalance_interval=kwargs.get("rebalance_interval", 100),
             writer=kwargs.get("writer", None),
-            episode_length=episode_length  # Passing episode_length
+            episode_length=episode_length,
         )
-        interfs = kwargs.get("interference_vals", [0]*len(traces))
+        interfs = kwargs.get("interference_vals", [0] * len(traces))
         for (states, actions, rewards, network_output), interf in zip(traces, interfs):
-            buf.add_episode(states, actions, rewards, network_output, reward_agg, init_loss, interf)
+            buf.add_episode(
+                states,
+                actions,
+                rewards,
+                network_output,
+                reward_agg=reward_agg,
+                init_loss=init_loss,
+                interference=interf,
+            )
         return buf
 
-    def extend(self, traces, reward_agg="sum", init_loss: Optional[float] = None, **kwargs):
-        interfs = kwargs.get("interference_vals", [0]*len(traces))
+    def extend(
+        self,
+        traces,
+        reward_agg="sum",
+        init_loss: Optional[float] = None,
+        **kwargs,
+    ):
+        interfs = kwargs.get("interference_vals", [0] * len(traces))
         for (states, actions, rewards, network_output), interf in zip(traces, interfs):
-            self.add_episode(states, actions, rewards, network_output, reward_agg, init_loss, interf)
+            self.add_episode(
+                states,
+                actions,
+                rewards,
+                network_output,
+                reward_agg=reward_agg,
+                init_loss=init_loss,
+                interference=interf,
+            )
 
-    def add_episode(self, states, actions, rewards, network_output,
-                    reward_agg="sum", init_loss: Optional[float] = None, interference=0):
-        obs_np, act_np, rew_np, next_obs_np, done_np = _tracify(states, actions, rewards, network_output, reward_agg)
-        
-        # Decompose the trace into multiple episodes of the specified length
+    def add_episode(
+        self,
+        states,
+        actions,
+        rewards,
+        network_output,
+        reward_agg="sum",
+        init_loss: Optional[float] = None,
+        interference=0,
+    ):
+        obs_np, act_np, rew_np, next_obs_np, done_np = _tracify(
+            states, actions, rewards, network_output, reward_agg
+        )
         num_episodes = len(obs_np) // self.episode_length
         for i in range(num_episodes):
             start = i * self.episode_length
             end = (i + 1) * self.episode_length
-            
             ep = Episode(
-                obs_np[start:end], act_np[start:end], rew_np[start:end], next_obs_np[start:end], done_np[start:end],
+                obs_np[start:end],
+                act_np[start:end],
+                rew_np[start:end],
+                next_obs_np[start:end],
+                done_np[start:end],
                 init_loss=10000.0 if init_loss is None else float(init_loss),
                 gamma=self.gamma,
-                interference=interference
+                interference=interference,
             )
 
-            # Update running stats
             self.reward_summary = merge(self.reward_summary, ep.reward_summary)
-            self.gamma_summary  = merge(self.gamma_summary, ep.gamma_summary)
+            self.gamma_summary = merge(self.gamma_summary, ep.gamma_summary)
             if self.reward_summary[0] > 0:
                 w = ep.reward_summary[0] / self.reward_summary[0]
                 self.avg_return += (ep.avg_return - self.avg_return) * w
@@ -260,11 +305,10 @@ class RNNPriReplayEqualEp:
                     self.writer.add_scalar("data/return", self.run_return, self.data_num)
 
             self.sigma = math.sqrt(
-                max(0.0, var_unbiased(self.reward_summary)) +
-                max(0.0, var_unbiased(self.gamma_summary)) * max(0.0, self.avg_return)
+                max(0.0, var_unbiased(self.reward_summary))
+                + max(0.0, var_unbiased(self.gamma_summary)) * max(0.0, self.avg_return)
             )
 
-            # heap insert and capacity control
             self._push(ep)
             if len(self.heap) > self.capacity:
                 self._evict_leaf()
@@ -275,23 +319,26 @@ class RNNPriReplayEqualEp:
             if 0 <= eid < len(self.heap):
                 self._update_key(eid, float(new_loss))
             else:
-                raise IndexError(f"Episode ID {eid} out of range for replay buffer of size {len(self.heap)}")
+                raise IndexError(
+                    f"Episode ID {eid} out of range for replay buffer of size {len(self.heap)}"
+                )
         self._rebalance_if_needed(just_updated=len(ep_ids))
-    
-    # ---------------- sampling ----------------
+
     def _approx_rank_probs(self):
         N = len(self.heap)
-        if N == 0: return None
+        if N == 0:
+            return None
         idxs = np.arange(N, dtype=np.int64)
         ranks = idxs + 1
         probs = 1.0 / np.power(ranks.astype(np.float64), max(0.0, self.alpha))
         probs /= probs.sum()
         return probs
-    
+
     def _choose_episode_ids(self, batch_size: int):
         N = len(self.heap)
         probs = self._approx_rank_probs()
-        if probs is None: return [], None
+        if probs is None:
+            return [], None
         chosen = np.random.choice(np.arange(N), size=batch_size, replace=True, p=probs)
         return chosen.tolist(), probs
 
@@ -301,10 +348,6 @@ class RNNPriReplayEqualEp:
         beta: Optional[float] = None,
         device: Optional[th.device | str] = None,
     ) -> th.Tensor:
-        """
-        Compute importance-sampling weights from the per-sampled-episode probs.
-        probs_ep: shape [B], probabilities of the sampled episodes.
-        """
         if beta is None:
             beta = self.beta
         N = len(self.heap)
@@ -315,41 +358,32 @@ class RNNPriReplayEqualEp:
         if device is not None:
             w_t = w_t.to(device, non_blocking=True)
         return w_t.unsqueeze(-1)
-    
+
     def _gather_batch(
         self,
         ep_ids: List[int],
         T: int,
         device: Optional[th.device | str] = None,
     ):
-        """
-        Directly assemble batch from episode arrays using np.stack.
-        Assumes each episode has length >= T and same length.
-        Returns tensors on `device`.
-        """
         if not ep_ids:
             return None, None, None, None, None, None
 
         dev = th.device(device) if device is not None else self.device
-
-        # Grab all episodes once
         eps = [self.heap[eid] for eid in ep_ids]
         B = len(eps)
 
-        # ---- Direct stacking along batch axis (axis=1 gives [T, B, ·]) ----
-        obs_TB   = np.stack([ep.obs_np[:T]     for ep in eps], axis=1)            # (T, B, obs_dim)
-        act_TB   = np.stack([ep.actions_np[:T] for ep in eps], axis=1)            # (T, B, act_dim)
-        rew_TB   = np.stack([ep.rewards_np[:T] for ep in eps], axis=1)[..., None] # (T, B, 1)
-        nxt_TB   = np.stack([ep.next_obs_np[:T] for ep in eps], axis=1)           # (T, B, obs_dim)
-        done_TB  = np.stack([ep.dones_np[:T]    for ep in eps], axis=1)[..., None]# (T, B, 1)
-        interfs  = np.array([ep.interference    for ep in eps], dtype=np.float32) # (B,)
+        obs_TB = np.stack([ep.obs_np[:T] for ep in eps], axis=1)
+        act_TB = np.stack([ep.actions_np[:T] for ep in eps], axis=1)
+        rew_TB = np.stack([ep.rewards_np[:T] for ep in eps], axis=1)[..., None]
+        nxt_TB = np.stack([ep.next_obs_np[:T] for ep in eps], axis=1)
+        done_TB = np.stack([ep.dones_np[:T] for ep in eps], axis=1)[..., None]
+        interfs = np.array([ep.interference for ep in eps], dtype=np.float32)
 
-        # ---- Single NumPy -> Torch hop per array ----
-        obs_TB_t   = th.from_numpy(obs_TB).to(dev, non_blocking=True)
-        act_TB_t   = th.from_numpy(act_TB).to(dev, non_blocking=True)
-        rew_TB_t   = th.from_numpy(rew_TB).to(dev, non_blocking=True)
-        nxt_TB_t   = th.from_numpy(nxt_TB).to(dev, non_blocking=True)
-        done_TB_t  = th.from_numpy(done_TB).to(dev, non_blocking=True)
+        obs_TB_t = th.from_numpy(obs_TB).to(dev, non_blocking=True)
+        act_TB_t = th.from_numpy(act_TB).to(dev, non_blocking=True)
+        rew_TB_t = th.from_numpy(rew_TB).to(dev, non_blocking=True)
+        nxt_TB_t = th.from_numpy(nxt_TB).to(dev, non_blocking=True)
+        done_TB_t = th.from_numpy(done_TB).to(dev, non_blocking=True)
         interf_B_t = th.from_numpy(interfs).to(dev, non_blocking=True).unsqueeze(-1)
 
         return obs_TB_t, act_TB_t, rew_TB_t, nxt_TB_t, done_TB_t, interf_B_t
@@ -365,13 +399,12 @@ class RNNPriReplayEqualEp:
             return
 
         dev = th.device(device) if device is not None else self.device
-
         ep_ids, probs_all = self._choose_episode_ids(batch_size)
         if not ep_ids:
             return
 
         idxs = np.asarray(ep_ids, dtype=np.int64)
-        probs_ep = probs_all[idxs]  # [B]
+        probs_ep = probs_all[idxs]
 
         obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(
             ep_ids, self.episode_length, device=dev
@@ -389,5 +422,3 @@ class RNNPriReplayEqualEp:
             "probs": prob_B1,
         }
         yield (obs_TB, act_TB, rew_TB, nxt_TB, done_TB, info)
-
-        
