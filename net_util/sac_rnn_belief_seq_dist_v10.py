@@ -39,8 +39,6 @@ def quantile_huber_loss(pred: Tensor, target: Tensor, taus: Tensor, kappa: float
     # print(target.unsqueeze(-2).shape)
     # print(pred.unsqueeze(-1).shape)
     td = target.unsqueeze(-2).unsqueeze(-3) - pred.unsqueeze(-1)
-    # print(td.shape)
-    # exit()
     abs_td = td.abs()
     huber = th.where(
         abs_td <= kappa,
@@ -111,7 +109,7 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         np.random.seed(cfg.seed)
         th.backends.cudnn.benchmark = True
         
-        bins = 51
+        bins = 26
 
         net_mod = importlib.import_module(cfg.network_module_path)
         net_class = getattr(net_mod, "Network")
@@ -598,9 +596,9 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
 
             
         if self._global_step % (self.cfg.log_interval * 10) == 0:
-            self._probe_z_ablation_feature(obs_train, h_burn, f_h_burn_critic, writer, self._global_step)
+            self._probe_z_ablation_feature(obs_train, h_burn, f_h_burn_actor, writer, self._global_step)
             self._probe_z_ablation_action(
-                obs_train, h_burn, f_h_burn_critic, writer, self._global_step, noise_std=0.1
+                obs_train, h_burn, f_h_burn_actor, writer, self._global_step, noise_std=0.1
             )
 
         self._global_step += 1

@@ -47,7 +47,7 @@ class Network(nn.Module):
         log_std_min: float = -20.0,
         log_std_max: float = 2.0,
         n_critics: int = 2,
-        dropped_per_critic: int = 10,
+        dropped_per_critic: int = 5,
     ):
         super().__init__()
         self.log_std_min, self.log_std_max = float(log_std_min), float(log_std_max)
@@ -211,8 +211,9 @@ class Network(nn.Module):
     ) -> th.Tensor:
         z_TBH, _, _, _ = self.belief_encode(nxt_TBD, b_h, is_evaluate=True)
 
-        feat_actor_TBH, _ = self.actor_fe._encode(nxt_TBD, f_h_actor)
-        feat_actor_TBH = th.cat([feat_actor_TBH, z_TBH], dim=-1)
+        # feat_actor_TBH, _ = self.actor_fe._encode(nxt_TBD, f_h_actor)
+        # feat_actor_TBH = th.cat([feat_actor_TBH, z_TBH], dim=-1)
+        feat_actor_TBH, _ = self.actor_feature_compute(nxt_TBD, z_TBH, f_h_actor)
         a_TBA, logp_TB1 = self.action_compute(feat_actor_TBH, is_evaluate=False)
 
         feat_critic_TBH, _ = self.critic_fe_t._encode(nxt_TBD, f_h_critic)
