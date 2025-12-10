@@ -90,9 +90,12 @@ def rel_config_path(path_str: str) -> str:
     return "/".join(parts[1:]) if len(parts) > 1 else parts[0]
 
 
-def now_trial_folder(exp_name: str, interference_level: int) -> Path:
+def now_trial_folder(exp_name: str, interference_level: int, is_evaluate=False) -> Path:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    folder = Path(f"exp_trace/{exp_name}/IL_{interference_level}_trial_{ts}")
+    if is_evaluate:
+        folder = Path(f"exp_trace/Eval_{exp_name}/IL_{interference_level}_trial_{ts}")
+    else:
+        folder = Path(f"exp_trace/{exp_name}/IL_{interference_level}_trial_{ts}")
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
@@ -233,7 +236,6 @@ def run_iteration(
         mac_res = check_table_creation(macs_need_separate[sta_name])
         if not all(mac_res):
             seperate_nic(sudoip, macs_need_separate[sta_name])
-    
     ##
     while True:
         # 1) start agents
@@ -268,7 +270,7 @@ def run_iteration(
         ##
 
     # 4) collect artifacts
-    folder = now_trial_folder(exp_name, interference_level=int_level)
+    folder = now_trial_folder(exp_name, interference_level=int_level, is_evaluate=is_evaluate)
     pull_rtt_logs(folder, tx_flows)
     move_rollout_from_tx(folder, tx_srcs, is_evaluate)
     
@@ -309,9 +311,11 @@ def train_loop(
     sudoip:SudoIP,
 ):
     def path_id(iteration):
-        return (iteration // args.per_exp_trials) % len(paths)
-        # return random.randint(0, len(paths) - 1)
-        
+        # return (iteration // args.per_exp_trials) % len(paths)
+        return random.randint(0, len(paths) - 1)
+    
+    evaluation_interval = 100
+    
     traces: List[Path] = []
     max_traces = 1
     iteration = 0
@@ -329,18 +333,29 @@ def train_loop(
     train_forever(conn, control_cfg, f'exp_trace/{exp_name}', None)
     
     while True:
+        if iteration % evaluation_interval == evaluation_interval - 1:
+            evaluate(
+                args,
+                conn,
+                paths,
+                duration,
+                exp_name,
+                sudoip,
+            )
+
         if iteration % args.per_exp_trials == 0:
             interference_level = path_id(iteration)
             path = paths[ interference_level ]
             print(f"Train config {path}")
             tx_srcs, tx_flows, inter_srcs, inter_flows, macs_need_separate = create_transmission_config( path, exp_name, conn, is_update=True)
-            
+
         iteration = run_iteration(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
             duration, exp_name, iteration, traces, max_traces, int_level=interference_level, 
             sudoip=sudoip,
             macs_need_separate = macs_need_separate
         )
+        
 
 
 def evaluate(
@@ -352,15 +367,17 @@ def evaluate(
     sudoip: SudoIP
 ):
     # single evaluation pass reusing the same building blocks
+    print("================ Evaluation Mode ==================")
     for int_level, path in enumerate(paths): 
         print(f"Evaluate config {path}")
-        tx_srcs, tx_flows, inter_srcs, inter_flows, macs_need_separate = create_transmission_config( path, exp_name, conn, is_update=True)
+        tx_srcs, tx_flows, inter_srcs, inter_flows, macs_need_separate = create_transmission_config( path, exp_name, conn, is_update=True, duration = duration)
         _ = run_iteration(
             args, conn, tx_srcs, tx_flows, inter_srcs, inter_flows,
             duration, exp_name, iteration=0, traces=[], max_traces=1, int_level=int_level, is_evaluate=True,
             macs_need_separate = macs_need_separate,
             sudoip = sudoip,
             )
+    print("================ End of Evaluation ================")
 
 
 def main():
