@@ -24,9 +24,10 @@ import logging
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from net_util.base import PolicyBase
 from util.ipc import ipc_control  # noqa: E402
-from util.control_cmd import ControlCmd, _json_default  # noqa: E402
+from util.control_cmd import ControlCmd, _json_default, list_to_cmd  # noqa: E402
 from util.trace_collec import trace_filter, flatten_leaves, create_obs
 from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY
+from util.baseline import BASELINE_REGISTRY
 
 # -------------------------
 # Logger
@@ -116,6 +117,8 @@ class AgentConfig:
     fail_fast: bool
     out_dir: Path
     duration: Optional[float] = None  # seconds; if set, overrides iterations
+    initial_cmd: Optional[list] = None
+    baseline: Optional[str] = None
 
 
 class GracefulExit(Exception):
@@ -164,7 +167,7 @@ def ipc_get_statistics(ctrl: ipc_control,
 # -------------------------
 # Main agent loop
 # -------------------------
-def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eval: bool):
+def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eval: bool, baseline_policy: Optional[PolicyBase] = None):
     ensure_dir(cfg.out_dir)
     jsonl_path = cfg.out_dir / "rollout.jsonl"
 
@@ -212,15 +215,22 @@ def run_agent(cfg: AgentConfig, policy: PolicyBase, control_config: Dict, is_eva
             
             current_stats = {'stats': stats}
             
-            states = flatten_leaves(trace_filter( current_stats, control_config['state_cfg'] ))
-            obs_for_policy = create_obs(states, 0, last_action)
-            
             # 2) Base action + stochastic exploration
-            try:
-                res, control_cmd = policy.act(obs_for_policy, is_eval)
-            except Exception as e:
-                logging.error(f"[ERROR] Failed to build ControlCmd for {e}", exc_info=True)
-                continue
+            if baseline_policy:
+                cmd_val = baseline_policy.act(current_stats)
+                control_cmd = list_to_cmd(policy.cmd_cls, cmd_val)
+                res = {'action': cmd_val}
+            elif cfg.initial_cmd:
+                control_cmd = list_to_cmd(policy.cmd_cls, cfg.initial_cmd)
+                res = {'action': cfg.initial_cmd}
+            else:
+                states = flatten_leaves(trace_filter( current_stats, control_config['state_cfg'] ))
+                obs_for_policy = create_obs(states, 0, last_action)
+                try:
+                    res, control_cmd = policy.act(obs_for_policy, is_eval)
+                except Exception as e:
+                    logging.error(f"[ERROR] Failed to build ControlCmd for {e}", exc_info=True)
+                    continue
                 
             # Build ControlCmd using canonical mapping (pads/trims internally)
             control_body: Dict[str, ControlCmd] = {}
@@ -319,12 +329,22 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
             policy.load(policy_load_path, device=policy_cfg['device'])
         except:
             logging.error("Load fail; Fall back to no model", exc_info=True)
-    return cfg, policy, control_config, args.eval
+            
+    ## Baseline Load
+    baseline_policy = None
+    if cfg.baseline:
+        baseline_policy = BASELINE_REGISTRY[cfg.baseline](
+            state_cfg = control_config['state_cfg'],
+            initial_cmd = cfg.initial_cmd,
+        )
+        pass
+    print(cfg)
+    return cfg, policy, control_config, args.eval, baseline_policy
     
 def main():
     try:
-        cfg, policy, control_config, is_eval = parse_args()
-        run_agent(cfg, policy, control_config, is_eval)
+        cfg, policy, control_config, is_eval, baseline_policy = parse_args()
+        run_agent(cfg, policy, control_config, is_eval, baseline_policy)
     except GracefulExit:
         logging.info("\n[INFO] Caught interrupt, exiting.")
     except KeyboardInterrupt:
