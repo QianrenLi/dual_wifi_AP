@@ -223,7 +223,7 @@ class Network(nn.Module):
         z_list = []
         for qt in self.critics_t:
             z_list.append(qt(xa).unsqueeze(2))
-        z_cat = th.cat(z_list, dim=2)
+        z_cat = th.cat(z_list, dim=-2)
 
         T, B, C, N = z_cat.shape
         z_flat = z_cat.reshape(T, B, C * N)

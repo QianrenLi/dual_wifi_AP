@@ -109,7 +109,7 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         np.random.seed(cfg.seed)
         th.backends.cudnn.benchmark = True
         
-        bins = 26
+        bins = 51
 
         net_mod = importlib.import_module(cfg.network_module_path)
         net_class = getattr(net_mod, "Network")
@@ -137,6 +137,8 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         self._eval_h: Tensor | None = None
         self._belief_h: Tensor | None = None
         
+        self.actor_loss_scale_S: th.Tensor = th.tensor(1.0, device=self.device)
+        
     def _alpha(self) -> Tensor:
         if self.log_alpha is not None:
             alpha = self.log_alpha.exp()
@@ -152,6 +154,28 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
             return max_beta
         
         return max(max_beta * (epoch / warmup_steps), 0)
+    
+    def update_actor_loss_scale(self, returns_train: th.Tensor,
+                                alpha: float = 0.99) -> th.Tensor:
+        """
+        returns_train: [T, B, 1] lambda-returns
+        Updates self.actor_loss_scale_S (scalar EMA).
+        """
+        with th.no_grad():
+            r = returns_train.squeeze(-1)  # [T, B]
+
+            # compute 5th and 95th percentile over batch dim at once
+            q = th.tensor([0.05, 0.95], device=r.device, dtype=r.dtype)
+            per = th.quantile(r, q, dim=1)    # shape [2, T]
+            delta_all = per[1] - per[0]       # [T]
+
+            S = self.actor_loss_scale_S
+            for delta in delta_all:           # EMA over time
+                S = alpha * S + (1.0 - alpha) * delta
+
+            self.actor_loss_scale_S = S
+
+        return self.actor_loss_scale_S
 
     @staticmethod
     def _step_with_clip(params_iterable, opt: th.optim.Optimizer, loss: Tensor, clip_norm: float | None) -> None:
@@ -318,25 +342,27 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
 
         z_TBCN = self.net.critic_compute(feat_TBH, act_TBA)  # [T,B,C,N]
         T, B, C, N = z_TBCN.shape
-
+        
         taus = (2 * th.arange(1, N+1, device=z_TBCN.device) - 1) / (2.0 * N)
 
         loss_TBC = quantile_huber_loss(z_TBCN, backup_q_TB1, taus)   # [T,B,C]
         c_loss_batch = loss_TBC.mean(dim=-1).mean(dim=0)             # [B]
 
         c_loss = (c_loss_batch * importance_weights).sum() / (importance_weights.sum() + 1e-8)
+        # c_loss = c_loss_batch.mean()
 
         return c_loss, c_loss_batch.detach(), {}
     
 
-    def _actor_loss(self, feat_TBH: Tensor, a_pi_TBA: Tensor, logp_TB1: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    def _actor_loss(self, feat_TBH: Tensor, a_pi_TBA: Tensor, logp_TB1: Tensor, returns_train: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         alpha = self._alpha()
         z_TBCN = self.net.critic_compute(feat_TBH, a_pi_TBA)   # [T,B,C,N]
 
         q_TBC = z_TBCN.mean(dim=-1)                            # [T,B,C]
         qmin_pi = q_TBC.mean(dim=-1, keepdim=True)           # [T,B,1]
 
-        a_loss = (alpha * logp_TB1 - qmin_pi).mean()
+        scale_value = self.update_actor_loss_scale(returns_train.detach()).item() / 3.3
+        a_loss = (alpha * logp_TB1 - (qmin_pi - returns_train.detach()) / max(scale_value, 1)).mean()
 
         qdist_avg = z_TBCN.mean(dim=(0, 1, 2)).detach()        # [N]
 
@@ -476,6 +502,7 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         rew_train = rew_TB1[burn_in:]
         nxt_train = nxt_TBD[burn_in:]
         done_train = done_TB1[burn_in:]
+        returns_train = info["returns"][burn_in:]
 
         with th.no_grad():
             z_burn, h_burn, _, _ = self.net.belief_encode(obs_burn, is_evaluate=True)
@@ -493,7 +520,7 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         a_pi_TBA, logp_TB1, mu_TBA, std_TBA = self.net.action_compute(feat_actor_TBH, return_stats=True)
         
         if self.alpha_opt is not None:
-            ent_loss = self._alpha_loss(logp_TB1)
+            ent_loss = self._alpha_loss(logp_TB1.detach())
             self._step_with_clip([self.log_alpha], self.alpha_opt, ent_loss, clip_norm=5.0)  # type: ignore
         
         feat_TBH, _ = self.net.critic_feature_compute(obs_train, z_BH.detach(), f_h_burn_critic)
@@ -512,7 +539,7 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         self.net.soft_sync(self.cfg.tau)
         
         with self.net.critics_frozen():
-            a_loss, qmin_pi, qdist_avg = self._actor_loss(feat_actor_TBH, a_pi_TBA, logp_TB1)
+            a_loss, qmin_pi, qdist_avg = self._actor_loss(feat_TBH.detach(), a_pi_TBA, logp_TB1, returns_train=returns_train)
             self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=5.0)
 
             mu_mean = mu_TBA.mean(dim=(0, 1))
