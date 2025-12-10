@@ -66,7 +66,7 @@ def _tracify(states, actions, rewards, network_output, reward_agg):
 
 # ---------------- episode (Modified to use NumPy) ----------------
 class Episode:
-    __slots__ = ("obs_np","actions_np","rewards_np","next_obs_np","dones_np","loss",
+    __slots__ = ("obs_np","actions_np","rewards_np","next_obs_np","dones_np", "rets_np","loss",
                  "reward_summary","gamma_summary","avg_return","interference",
                  "data_num","_heap_idx")
                  
@@ -85,11 +85,12 @@ class Episode:
         self.data_num = self.reward_summary[0]
         
         # Calculate avg_return (variance of returns)
-        G = 0.0; sq = 0.0
+        G = 0.0
+        rets_np = np.zeros(self.data_num, dtype=np.float32)
         for t in range(self.data_num-1, -1, -1):
             G = float(rew_np[t]) + gamma * G * (1.0 - float(done_np[t]))
-            sq += G*G
-        self.avg_return = sq / max(1, self.data_num)
+            rets_np[t] = G
+        self.rets_np = rets_np
         
         self.interference = float(interference)
         self._heap_idx = -1  # maintained by buffer
@@ -294,9 +295,6 @@ class RNNPriReplayEqualEp:
 
             self.reward_summary = merge(self.reward_summary, ep.reward_summary)
             self.gamma_summary = merge(self.gamma_summary, ep.gamma_summary)
-            if self.reward_summary[0] > 0:
-                w = ep.reward_summary[0] / self.reward_summary[0]
-                self.avg_return += (ep.avg_return - self.avg_return) * w
 
             for r in ep.rewards_np.tolist():
                 self.run_return = float(r) + self.gamma * self.run_return
@@ -304,10 +302,10 @@ class RNNPriReplayEqualEp:
                 if self.writer is not None:
                     self.writer.add_scalar("data/return", self.run_return, self.data_num)
 
-            self.sigma = math.sqrt(
-                max(0.0, var_unbiased(self.reward_summary))
-                + max(0.0, var_unbiased(self.gamma_summary)) * max(0.0, self.avg_return)
-            )
+            # self.sigma = math.sqrt(
+            #     max(0.0, var_unbiased(self.reward_summary))
+            #     + max(0.0, var_unbiased(self.gamma_summary)) * max(0.0, self.avg_return)
+            # )
 
             self._push(ep)
             if len(self.heap) > self.capacity:
@@ -378,6 +376,7 @@ class RNNPriReplayEqualEp:
         nxt_TB = np.stack([ep.next_obs_np[:T] for ep in eps], axis=1)
         done_TB = np.stack([ep.dones_np[:T] for ep in eps], axis=1)[..., None]
         interfs = np.array([ep.interference for ep in eps], dtype=np.float32)
+        rets = np.stack([ep.rets_np[:T] for ep in eps], axis=1)[..., None]
 
         obs_TB_t = th.from_numpy(obs_TB).to(dev, non_blocking=True)
         act_TB_t = th.from_numpy(act_TB).to(dev, non_blocking=True)
@@ -385,8 +384,9 @@ class RNNPriReplayEqualEp:
         nxt_TB_t = th.from_numpy(nxt_TB).to(dev, non_blocking=True)
         done_TB_t = th.from_numpy(done_TB).to(dev, non_blocking=True)
         interf_B_t = th.from_numpy(interfs).to(dev, non_blocking=True).unsqueeze(-1)
+        rets_TB_t = th.from_numpy(rets).to(dev, non_blocking=True)
 
-        return obs_TB_t, act_TB_t, rew_TB_t, nxt_TB_t, done_TB_t, interf_B_t
+        return obs_TB_t, act_TB_t, rew_TB_t, nxt_TB_t, done_TB_t, interf_B_t, rets_TB_t
 
     def get_sequences(
         self,
@@ -406,7 +406,7 @@ class RNNPriReplayEqualEp:
         idxs = np.asarray(ep_ids, dtype=np.int64)
         probs_ep = probs_all[idxs]
 
-        obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B = self._gather_batch(
+        obs_TB, act_TB, rew_TB, nxt_TB, done_TB, interf_B, rets_TB_t = self._gather_batch(
             ep_ids, self.episode_length, device=dev
         )
 
@@ -414,11 +414,13 @@ class RNNPriReplayEqualEp:
         prob_B1 = th.from_numpy(probs_ep.astype(np.float32)).to(
             dev, non_blocking=True
         ).unsqueeze(-1)
+        
 
         info = {
             "ep_ids": ep_ids,
             "interference": interf_B,
             "is_weights": is_w_B1,
             "probs": prob_B1,
+            "returns": rets_TB_t,
         }
         yield (obs_TB, act_TB, rew_TB, nxt_TB, done_TB, info)
