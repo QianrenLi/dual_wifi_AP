@@ -24,9 +24,7 @@ import argparse
 import json
 import os
 import sys
-import re
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -38,7 +36,12 @@ sys.path.append(parent)
 # --- Optional project utilities (fallbacks provided) ---
 from util.trace_collec import trace_filter, flatten_leaves  # type: ignore
 
-_TS_RE = re.compile(r"^trial_(\d{8}-\d{6})$")  # trial_YYYYMMDD-HHMMSS
+# Import shared plotting utilities
+from exp_trace.plot_config import PlotTheme
+from exp_trace.plot_utils import (
+    list_trials, discounted_running_sum, downsample_series,
+    create_figure, save_figure, apply_scientific_style
+)
 
 @dataclass
 class Config:
@@ -50,35 +53,6 @@ class Config:
     stride: Optional[int] = None  # optional downsample stride (e.g., 5, 10)
 
 # ---------- helpers ----------
-
-def _trial_sort_key(p: Path) -> Tuple[int, str]:
-    m = _TS_RE.match(p.name)
-    if m:
-        try:
-            ts = datetime.strptime(m.group(1), "%Y%m%d-%H%M%S")
-            return (int(ts.timestamp()), p.name)
-        except Exception:
-            pass
-    try:
-        return (int(p.stat().st_mtime), p.name)
-    except Exception:
-        return (0, p.name)
-
-def list_trials(root: Path, recent: int) -> List[Path]:
-    trials = [p for p in root.iterdir() if p.is_dir() and p.name.startswith("IL_")]
-    trials.sort(key=_trial_sort_key, reverse=True)  # newest first
-    if recent and recent > 0:
-        trials = trials[:recent]
-    trials.reverse()  # oldest -> newest for temporal continuity
-    return trials
-
-def discounted_running_sum(xs: List[float], gamma: float) -> List[float]:
-    acc = 0.0
-    out: List[float] = []
-    for r in xs:
-        acc = acc * gamma + r
-        out.append(acc)
-    return out
 
 def read_reward_series(trials: List[Path], reward_cfg: Optional[Dict[str, Any]], agg: str) -> List[float]:
     """Aggregate reward per record from rollout.jsonl across trials (oldest->newest)."""
@@ -128,6 +102,7 @@ def plot_rewards(
     stride: Optional[int] = None,
     ax=None,
     label: str = "reward",
+    color: Optional[str] = None,
 ):
     """
     Plot reward time series from trial_* rollout.jsonl using Matplotlib.
@@ -150,6 +125,8 @@ def plot_rewards(
         Axis to plot into; creates a new figure/axis if None.
     label : str
         Series label for the legend.
+    color : str, optional
+        Color for the plot line (default: from theme)
 
     Returns
     -------
@@ -159,29 +136,36 @@ def plot_rewards(
     control_config = Path(control_config)
     reward_cfg = load_reward_cfg(control_config)
 
-    trials = list_trials(root, recent)
+    trials = list_trials(root, recent, pattern="IL_")
     ys = read_reward_series(trials, reward_cfg, agg="sum")  # default agg=sum (same as your app)
     if mode == "acc":
         ys = discounted_running_sum(ys, gamma)
 
     xs = list(range(1, len(ys) + 1))
     if stride and stride > 1 and len(xs) > stride:
-        xs = xs[::stride]
-        ys = ys[::stride]
-        # ensure last point included
-        if xs and xs[-1] != (len(read_reward_series(trials, reward_cfg, "sum"))):
-            xs.append(len(read_reward_series(trials, reward_cfg, "sum")))
-            ys.append(ys[-1])
+        xs, ys = downsample_series(xs, ys, stride)
 
+    # Create figure if no axis provided
     if ax is None:
-        fig, ax = plt.subplots()
+        fig, ax = create_figure(size="wide")
 
-    ax.plot(xs, ys, label=f"{label} ({mode}{'' if mode=='element' else f', γ={gamma:.3f}'})")
-    ax.set_xlabel("global step")
-    ax.set_ylabel("reward")
-    ax.set_title(f"Reward over time • root={root.name} • recent={recent or 'all'}")
+    # Use theme color if none provided
+    if color is None:
+        color = PlotTheme.get_color(0)
+
+    # Plot with styling
+    ax.plot(xs, ys, color=color, linewidth=2,
+            label=f"{label} ({mode}{'' if mode=='element' else f', γ={gamma:.3f}'})")
+
+    # Apply scientific styling
+    apply_scientific_style(
+        ax,
+        xlabel="global step",
+        ylabel="reward",
+        title=f"Reward over time • {root.name} • recent={recent or 'all'}"
+    )
+
     ax.legend()
-    ax.grid(True)
     return ax
 
 # ---------- CLI ----------
@@ -206,17 +190,18 @@ def _parse_args() -> Config:
 
 def main():
     cfg = _parse_args()
-    ax = plot_rewards(
+    fig, ax = create_figure(size="wide")
+    plot_rewards(
         root=cfg.root,
         control_config=cfg.control_path,
         mode=cfg.mode,
         gamma=cfg.gamma,
         recent=cfg.recent,
         stride=cfg.stride,
+        ax=ax
     )
-    plt.tight_layout()
+    save_figure(fig, "reward.png")
     # plt.show()
-    plt.savefig("reward.png")
 
 if __name__ == "__main__":
     main()

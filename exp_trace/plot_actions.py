@@ -8,32 +8,18 @@ Usage:
 """
 
 from __future__ import annotations
-import argparse, json, re
+import argparse, json
 from pathlib import Path
-from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 
-_TS_RE = re.compile(r"^trial_(\d{8}-\d{6})$")
-
-def _trial_sort_key(p: Path) -> Tuple[int, str]:
-    m = _TS_RE.match(p.name)
-    if m:
-        try:
-            ts = datetime.strptime(m.group(1), "%Y%m%d-%H%M%S")
-            return (int(ts.timestamp()), p.name)
-        except:
-            pass
-    return (int(p.stat().st_mtime), p.name)
-
-def _list_trials(root: Path, recent: int) -> List[Path]:
-    trials = [p for p in root.iterdir() if p.is_dir() and p.name.startswith("IL_")]
-    trials.sort(key=_trial_sort_key, reverse=True)
-    if recent and recent > 0:
-        trials = trials[:recent]
-    trials.reverse()
-    return trials
+# Import shared plotting utilities
+from exp_trace.plot_config import PlotTheme
+from exp_trace.plot_utils import (
+    list_trials, moving_average, create_figure, save_figure,
+    apply_scientific_style
+)
 
 def _read_actions(trials: List[Path]) -> List[List[float]]:
     acts: List[List[float]] = []
@@ -52,22 +38,45 @@ def _read_actions(trials: List[Path]) -> List[List[float]]:
                     acts.append([float(x) for x in action])
     return acts
 
-def _smooth(y: List[float], window: int) -> List[float]:
-    if window <= 1 or len(y) < window:
-        return y
-    kernel = np.ones(window) / window
-    return np.convolve(y, kernel, mode="same").tolist()
 
 def plot_actions(root: str | Path, recent: int = 0, stride: Optional[int] = None,
                  smooth: int = 1, action_selection: Optional[int] = None,
-                 ax=None, labels: Optional[List[str]] = None):
+                 ax=None, labels: Optional[List[str]] = None,
+                 colors: Optional[List[str]] = None):
+    """
+    Plot action vectors with optional smoothing.
+
+    Parameters
+    ----------
+    root : str | Path
+        Directory containing trial_* folders
+    recent : int, optional
+        Number of most recent trials to include (default: 0 = all)
+    stride : int, optional
+        Downsampling stride (default: None)
+    smooth : int, optional
+        Moving average window size (default: 1 = no smoothing)
+    action_selection : int, optional
+        Specific action dimension to plot (default: None = all)
+    ax : matplotlib.axes.Axes, optional
+        Axis to plot on (default: None = create new)
+    labels : list, optional
+        Labels for each action dimension (default: auto-generated)
+    colors : list, optional
+        Colors for each action dimension (default: from theme)
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+    """
     root = Path(root)
-    trials = _list_trials(root, recent)
+    trials = list_trials(root, recent, pattern="IL_")
     acts = _read_actions(trials)
+
     if not acts:
         if ax is None:
-            _, ax = plt.subplots()
-        ax.set_title("No actions found")
+            _, ax = create_figure(size="medium")
+        ax.set_title("No actions found", fontsize=PlotTheme.FONT_SIZE_XLARGE)
         ax.set_xlabel("step")
         ax.set_ylabel("action value")
         return ax
@@ -88,38 +97,35 @@ def plot_actions(root: str | Path, recent: int = 0, stride: Optional[int] = None
     # Prepare smoothed copy (keeps raw for background plotting)
     smoothed_series: Optional[List[List[float]]] = None
     if smooth > 1:
-        smoothed_series = [ _smooth(raw_series[i], smooth) for i in range(D) ]
+        smoothed_series = [moving_average(raw_series[i], smooth) for i in range(D)]
 
     if ax is None:
-        _, ax = plt.subplots()
+        _, ax = create_figure(size="wide")
 
     def _label_for(i: int) -> str:
         return labels[i] if labels and i < len(labels) else f"a{i}"
 
-    # Styling
-    lw_raw = 1.0
-    lw_smooth = 2.0
-    alpha_raw = 0.10
-    z_raw = 1
-    z_smooth = 2
+    # Use theme colors if not provided
+    if colors is None:
+        colors = [PlotTheme.get_color(i) for i in range(D)]
 
     # Plot helper for one dimension
     def plot_dim(i: int):
         base_label = _label_for(i)
+        color = colors[i % len(colors)]
+
         if smoothed_series is None:
             # No smoothing: plot only raw
-            ax.plot(xs, raw_series[i], label=base_label)
+            ax.plot(xs, raw_series[i], label=base_label,
+                   color=color, linewidth=2)
             return
 
-        # With smoothing: plot raw in background, smoothed on top using same color
-        # Grab a color from the cycler once per dimension
-        color = ax._get_lines.get_next_color()
-        # Raw background
-        ax.plot(xs, raw_series[i], label=f"{base_label} (raw)", linewidth=lw_raw,
-                alpha=alpha_raw, zorder=z_raw, color=color)
-        # Smoothed foreground
-        ax.plot(xs, smoothed_series[i], label=f"{base_label} (smoothed w={smooth})",
-                linewidth=lw_smooth, zorder=z_smooth, color=color)
+        # With smoothing: plot raw in background, smoothed on top
+        ax.plot(xs, raw_series[i], label=f"{base_label} (raw)",
+               color=color, linewidth=1, alpha=0.3, zorder=1)
+        ax.plot(xs, smoothed_series[i],
+               label=f"{base_label} (smoothed w={smooth})",
+               color=color, linewidth=2.5, zorder=2)
 
     if action_selection is not None:
         if 0 <= action_selection < D:
@@ -130,11 +136,15 @@ def plot_actions(root: str | Path, recent: int = 0, stride: Optional[int] = None
         for i in range(D):
             plot_dim(i)
 
-    ax.set_xlabel("global step")
-    ax.set_ylabel("action value")
-    ax.set_title(f"res.action over time • root={root.name} • recent={recent or 'all'}")
-    ax.legend(ncol=2 if smoothed_series is not None else 1, fontsize=9)
-    ax.grid(True, linestyle="--", alpha=0.4)
+    # Apply scientific styling
+    apply_scientific_style(
+        ax,
+        xlabel="global step",
+        ylabel="action value",
+        title=f"Actions over time • {root.name} • recent={recent or 'all'}"
+    )
+
+    ax.legend(ncol=2 if smoothed_series is not None else 1, fontsize=10)
     return ax
 
 # -------- CLI --------
@@ -150,17 +160,18 @@ def _parse_args():
 
 def main():
     args = _parse_args()
+    fig, ax = create_figure(size="wide")
     plot_actions(
         root=args.root,
         recent=args.recent,
         stride=args.stride,
         smooth=args.smooth,
-        action_selection=args.selected
+        action_selection=args.selected,
+        ax=ax
     )
-    plt.tight_layout()
+    save_figure(fig, "action_plot.png")
+    print("Saved to action_plot.png")
     # plt.show()
-    plt.savefig("action_plot.png")
-    print("Saved to exp_trace/action_plot.png")
 
 if __name__ == "__main__":
     main()

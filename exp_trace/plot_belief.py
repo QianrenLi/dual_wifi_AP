@@ -1,25 +1,33 @@
 from typing import Any, Dict, Iterable, Optional, Callable, Union, List, Tuple
 from pathlib import Path
 import matplotlib.pyplot as plt
-import matplotlib
-plt.rcParams.update({
-    # "text.usetex": True,
-    "font.family": "sans-serif",
-    "font.sans-serif": "Helvetica",
-})
-matplotlib.rcParams['mathtext.fontset'] = 'stix'
-matplotlib.rcParams['font.family'] = 'STIXGeneral'
 
 from exp_trace.util import ExpTraceReader
+from exp_trace.plot_config import PlotTheme
+from exp_trace.plot_utils import create_figure, save_figure, apply_scientific_style, create_box_plot_with_stats
 
 # ------------------------------- Plotting ------------------------------- #
 def plot_belief_box_per_il(il_to_beliefs: Dict[int, List[float]],
                            title: str,
                            out_path: Path,
-                           showfliers: bool = False):
+                           showfliers: bool = False,
+                           figsize: str = "medium"):
     """
     Make ONE box figure: each box is the belief distribution for one IL (latest run).
     X tick labels are IL indices.
+
+    Parameters
+    ----------
+    il_to_beliefs : dict
+        Dictionary mapping IL IDs to belief value lists
+    title : str
+        Plot title
+    out_path : Path
+        Output file path
+    showfliers : bool, optional
+        Whether to show outliers (default: False)
+    figsize : str, optional
+        Figure size name (default: "medium")
     """
     if not il_to_beliefs:
         print("[info] Nothing to plot.")
@@ -28,18 +36,30 @@ def plot_belief_box_per_il(il_to_beliefs: Dict[int, List[float]],
     ils = sorted(il_to_beliefs.keys())
     data = [il_to_beliefs[i] if il_to_beliefs[i] else [0.0] for i in ils]
 
-    fig, ax = plt.subplots()
-    ax.boxplot(data, tick_labels=[str(i) for i in ils], showfliers=showfliers)
-    # ax.set_xlabel("IL index")
-    ax.set_ylabel("Belief", fontsize=18)
-    # ax.set_title(title)
-    ax.grid(True, axis="y", linestyle="--", alpha=0.4)
-    ax.tick_params(axis="x", labelsize=14)
-    ax.tick_params(axis="y", labelsize=14)
-    # plt.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=150)
-    plt.close(fig)
+    # Create figure with scientific styling
+    fig, ax = create_figure(size=figsize)
+
+    # Create styled box plot
+    create_box_plot_with_stats(
+        ax, data, labels=[str(i) for i in ils],
+        showfliers=showfliers,
+        patch_artist=True
+    )
+
+    # Apply scientific styling
+    apply_scientific_style(
+        ax,
+        ylabel="Belief",
+        title=title,
+        minor_ticks=False
+    )
+
+    # Adjust tick sizes
+    ax.tick_params(axis="x", labelsize=PlotTheme.FONT_SIZE_MEDIUM)
+    ax.tick_params(axis="y", labelsize=PlotTheme.FONT_SIZE_MEDIUM)
+
+    # Save figure
+    save_figure(fig, out_path, dpi=PlotTheme.DPI_PUBLICATION)
     print(f"[ok] Saved: {out_path}")
 
 # ----------------------------------- CLI ----------------------------------- #

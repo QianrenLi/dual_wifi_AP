@@ -4,37 +4,13 @@ from typing import Any, Dict, Iterable, Callable, Union, List, Sequence, Optiona
 import numpy as np
 import matplotlib.pyplot as plt
 
+from exp_trace.plot_config import PlotTheme
+from exp_trace.plot_utils import (
+    flatten_dict_of_lists, aggregate_values, create_figure,
+    save_figure, apply_scientific_style, error_bar_format
+)
+
 Agg = Union[str, Callable[[Iterable[float]], float]]
-
-import matplotlib
-plt.rcParams.update({
-    "font.family": "sans-serif",
-    "font.sans-serif": "Helvetica",
-})
-matplotlib.rcParams['mathtext.fontset'] = 'stix'
-matplotlib.rcParams['font.family'] = 'STIXGeneral'
-
-
-def _flatten_dict_of_lists(d: Dict[str, List[float]]) -> np.ndarray:
-    if not d:
-        return np.array([], dtype=float)
-    parts = []
-    for v in d.values():
-        a = np.asarray(v, dtype=float)
-        parts.append(a)
-    return np.concatenate(parts) if parts else np.array([], dtype=float)
-
-
-def _agg_vals(arr: np.ndarray, mode: str = "mean") -> float:
-    if arr.size == 0:
-        return float("nan")
-    if mode == "mean":
-        return float(np.nanmean(arr))
-    if mode == "median":
-        return float(np.nanmedian(arr))
-    if mode == "sum":
-        return float(np.nansum(arr))
-    return float(np.nanmean(arr))
 
 
 def _collect_pct_from_logs(logs: List["ChannelLog"]) -> tuple[np.ndarray, np.ndarray]:
@@ -53,30 +29,48 @@ def _collect_pct_from_logs(logs: List["ChannelLog"]) -> tuple[np.ndarray, np.nda
 
 
 def summarize_single_rollout(r: "Rollout", agg: str = "mean") -> Tuple[float, float, float]:
-    thr_arr = _flatten_dict_of_lists(r.throughput)
-    out_arr = _flatten_dict_of_lists(r.outage)
-    reward_arr = np.array(r.optional_data['reward'])
-    # thr = _agg_vals(thr_arr, agg)
-    # out = _agg_vals(out_arr, agg)
-    # rew = _agg_vals(reward_arr)
+    """
+    Summarize a single rollout's throughput, outage, and reward.
+
+    Parameters
+    ----------
+    r : Rollout
+        Rollout data
+    agg : str, optional
+        Aggregation method (default: "mean")
+
+    Returns
+    -------
+    tuple
+        (throughput_array, outage_array, reward_array)
+    """
+    thr_arr = flatten_dict_of_lists(r.throughput)
+    out_arr = flatten_dict_of_lists(r.outage)
+    reward_arr = np.array(r.optional_data.get('reward', []))
     return thr_arr, out_arr, reward_arr
 
 
-# def summarize_rollouts_for_bars(rollouts: List["Rollout"], agg: str = "mean"):
-#     thr_vals, out_vals, reward_vals = [], [], []
-#     for r in rollouts:
-#         thr, out, rew = summarize_single_rollout(r, agg=agg)
-#         thr_vals.append(thr)
-#         out_vals.append(out)
-#         reward_vals.append(rew)
-#     return thr_vals, out_vals, reward_vals
-
-
 def aggregate_stats_per_il(il_to_rollouts: Dict[str, List["Rollout"]], agg: str = "mean"):
+    """
+    Aggregate statistics across rollouts for each IL.
+
+    Parameters
+    ----------
+    il_to_rollouts : dict
+        Dictionary mapping IL IDs to lists of rollouts
+    agg : str, optional
+        Aggregation method (default: "mean")
+
+    Returns
+    -------
+    tuple
+        (il_ids, thr_mean, thr_std, out_mean, out_std, rew_mean, rew_std)
+    """
     il_ids = sorted(il_to_rollouts.keys())
     thr_mean, thr_std = [], []
     out_mean, out_std = [], []
     rew_mean, rew_std = [], []
+
     for il in il_ids:
         thr_list, out_list, rew_list = [], [], []
         for r in il_to_rollouts[il]:
@@ -84,22 +78,22 @@ def aggregate_stats_per_il(il_to_rollouts: Dict[str, List["Rollout"]], agg: str 
             thr_list.extend(thr)
             out_list.extend(out)
             rew_list.extend(rew)
+
         thr_arr = np.asarray(thr_list, dtype=float)
         out_arr = np.asarray(out_list, dtype=float)
         rew_arr = np.asarray(rew_list, dtype=float)
 
-        thr_mean.append(float(np.nanmean(thr_arr)) if thr_arr.size else float("nan"))
-        out_mean.append(float(np.nanmean(out_arr)) if out_arr.size else float("nan"))
-        rew_mean.append(float(np.nanmean(rew_arr)) if rew_arr.size else float("nan"))
+        # Use aggregate_values utility
+        thr_mean.append(aggregate_values(thr_arr, agg))
+        out_mean.append(aggregate_values(out_arr, agg))
+        rew_mean.append(aggregate_values(rew_arr, agg))
 
-        thr_std.append(float(np.nanstd(thr_arr, ddof=1)) if thr_arr.size > 1 else 0.0)
-        out_std.append(float(np.nanstd(out_arr, ddof=1)) if out_arr.size > 1 else 0.0)
-        rew_std.append(float(np.nanstd(rew_arr, ddof=1)) if rew_arr.size > 1 else 0.0)
+        # Calculate standard deviation
+        thr_std.append(aggregate_values(thr_arr, "std") if thr_arr.size > 1 else 0.0)
+        out_std.append(aggregate_values(out_arr, "std") if out_arr.size > 1 else 0.0)
+        rew_std.append(aggregate_values(rew_arr, "std") if rew_arr.size > 1 else 0.0)
 
     return il_ids, thr_mean, thr_std, out_mean, out_std, rew_mean, rew_std
-
-
-from matplotlib.ticker import AutoMinorLocator
 
 
 def plot_interface_percentages_boxplot(
@@ -180,14 +174,17 @@ def plot_interface_percentages_boxplot(
     if y_range is not None:
         ax.set_ylim(*y_range)
 
-    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
-    ax.grid(True, axis="y", which="major", linestyle="--", alpha=0.4, zorder=0)
-    ax.grid(True, axis="y", which="minor", linestyle=":", alpha=0.25, zorder=0)
+    # Apply scientific styling
+    apply_scientific_style(
+        ax,
+        ylabel=ylabel,
+        title=title,
+        minor_ticks=True
+    )
 
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=12)
-    ax.tick_params(axis="y", labelsize=12)
+    # Adjust tick sizes
+    ax.tick_params(axis="x", labelsize=PlotTheme.FONT_SIZE_MEDIUM)
+    ax.tick_params(axis="y", labelsize=PlotTheme.FONT_SIZE_MEDIUM)
 
     if annotate_n:
         for i, arr in enumerate(data, start=1):
@@ -197,8 +194,7 @@ def plot_interface_percentages_boxplot(
     plt.tight_layout()
 
     if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close(fig)
+        save_figure(fig, save_path, dpi=PlotTheme.DPI_PUBLICATION)
         print(f"Saved to {save_path}")
         return None
     return fig, ax
@@ -214,39 +210,68 @@ def plot_bar_simple(
     save_path: Optional[str] = None,
     y_limits_low: Optional[float] = None,
     errors: Optional[Sequence[float]] = None,
+    figsize: str = "medium",
 ):
-    x = np.arange(len(labels))
-    fig, ax = plt.subplots()
+    """
+    Create a simple bar plot with scientific styling.
 
-    total_bar_span = 3
-    width = total_bar_span / max(len(labels), 1)
+    Parameters
+    ----------
+    values : sequence
+        Bar heights
+    labels : sequence
+        Bar labels
+    title : str, optional
+        Plot title
+    ylabel : str, optional
+        Y-axis label
+    annotate : bool, optional
+        Whether to annotate bars with values (default: True)
+    rotation : int, optional
+        Label rotation angle (default: 0)
+    save_path : str, optional
+        Output file path
+    y_limits_low : float, optional
+        Lower y-axis limit
+    errors : sequence, optional
+        Error bar values
+    figsize : str, optional
+        Figure size name (default: "medium")
+
+    Returns
+    -------
+    tuple or None
+        (fig, ax) if save_path is None, otherwise None
+    """
+    fig, ax = create_figure(size=figsize)
+
+    x = np.arange(len(labels))
+    width = 0.8
+
     bars = ax.bar(
         x,
         values,
-        width=width * 0.9,
+        width=width,
         edgecolor="black",
-        hatch="///",
-        alpha=0.9,
+        alpha=0.8,
         linewidth=0.8,
         yerr=errors,
         capsize=4,
+        color=PlotTheme.get_color(0)
     )
 
-    if ylabel:
-        ax.set_ylabel(ylabel, fontsize=18)
-    if title:
-        ax.set_title(title)
+    # Apply scientific styling
+    apply_scientific_style(
+        ax,
+        ylabel=ylabel,
+        title=title,
+        ylim=(y_limits_low, None) if y_limits_low is not None else None,
+        minor_ticks=False
+    )
+
+    # Set x-ticks and rotation
     ax.set_xticks(x, labels)
     plt.setp(ax.get_xticklabels(), rotation=rotation)
-
-    ax.grid(True, axis="y", linestyle="--", alpha=0.4, zorder=0)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=14)
-    ax.tick_params(axis="y", labelsize=14)
-
-    if y_limits_low is not None:
-        ax.set_ylim(bottom=y_limits_low)
 
     if annotate and len(values) > 0:
         vmax = np.nanmax(values)
@@ -261,14 +286,13 @@ def plot_bar_simple(
                 label,
                 ha="center",
                 va="bottom",
-                fontsize=14,
+                fontsize=PlotTheme.FONT_SIZE_SMALL,
                 fontweight="bold",
             )
 
     if save_path:
-        plt.savefig(save_path, dpi=150)
-        plt.close(fig)
-        print(f"Save to {save_path}")
+        save_figure(fig, save_path, dpi=PlotTheme.DPI_PUBLICATION)
+        print(f"Saved to {save_path}")
         return None
     return fig, ax
 

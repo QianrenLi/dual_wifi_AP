@@ -4,38 +4,37 @@ from typing import Any, Dict, Iterable, Callable, Union, List, Sequence, Optiona
 import numpy as np
 import matplotlib.pyplot as plt
 
+from exp_trace.plot_config import PlotTheme
+from exp_trace.plot_utils import (
+    flatten_dict_of_lists, create_figure, save_figure,
+    apply_scientific_style
+)
 
 Agg = Union[str, Callable[[Iterable[float]], float]]  # "sum" | "mean" | custom reducer
-
-import matplotlib
-plt.rcParams.update({
-    # "text.usetex": True,
-    "font.family": "sans-serif",
-    "font.sans-serif": "Helvetica",
-})
-matplotlib.rcParams['mathtext.fontset'] = 'stix'
-matplotlib.rcParams['font.family'] = 'STIXGeneral'
-
-def _flatten_dict_of_lists(d: Dict[str, List[float]]) -> np.ndarray:
-    if not d:
-        return np.array([], dtype=float)
-    parts = []
-    for v in d.values():
-        a = np.asarray(v, dtype=float)
-        parts.append(a)
-    return np.concatenate(parts) if parts else np.array([], dtype=float)
 
 def summarize_rollouts_for_bars(rollouts: List["Rollout"]):
     thr_vals = []
     for r in rollouts:
-        thr_arr = _flatten_dict_of_lists(r.throughput)  # dict[link]->list[float]
+        thr_arr = flatten_dict_of_lists(r.throughput)  # dict[link]->list[float]
         thr_vals.append(thr_arr)
     return thr_vals
 
 # ------------------------------- Plotting ------------------------------- #
-def thru_plot(il_ids, thr_vals, out_dir):
-    # ------------------- Plot thr_vals for each interference -------------------
-    # ------------------- Subplots: one line per interference -------------------
+def thru_plot(il_ids, thr_vals, out_dir, figsize: str = "medium"):
+    """
+    Plot throughput values for each interference level as subplots.
+
+    Parameters
+    ----------
+    il_ids : list
+        Interference level IDs
+    thr_vals : list
+        Throughput value arrays for each IL
+    out_dir : Path
+        Output directory
+    figsize : str, optional
+        Figure size name (default: "medium")
+    """
     # Filter out empty throughput arrays first
     plot_items = [
         (il, thr)
@@ -45,42 +44,41 @@ def thru_plot(il_ids, thr_vals, out_dir):
 
     if not plot_items:
         print("[warn] No throughput data to plot.")
-    else:
-        n_plots = len(plot_items)
+        return
 
-        # Make each subplot the same size and stack them vertically
-        base_height = 2.5  # height per subplot (inches)
-        fig_width = 10
-        fig_height = base_height * n_plots
+    n_plots = len(plot_items)
 
-        fig, axes = plt.subplots(
-            nrows=n_plots,
-            ncols=1,
-            sharex=True,
-            figsize=(fig_width, fig_height),
-            dpi=120,
-        )
+    # Create figure with subplots
+    fig, axes = create_figure(
+        size=figsize,
+        nrows=n_plots,
+        ncols=1,
+        sharex=True
+    )
 
-        # If only one subplot, axes is not a list
-        if n_plots == 1:
-            axes = [axes]
+    # If only one subplot, axes is not a list
+    if n_plots == 1:
+        axes = [axes]
 
-        for ax, (il, thr) in zip(axes, plot_items):
-            xs = np.arange(len(thr))
-            ax.plot(xs, thr, linewidth=1.5)
-            ax.set_ylabel(f"IL {il}")
-            ax.grid(True, linestyle="--", alpha=0.4)
+    colors = [PlotTheme.get_color(i) for i in range(n_plots)]
 
-        # Bottom subplot gets the x label
-        axes[-1].set_xlabel("Sample Index")
+    for i, (ax, (il, thr)) in enumerate(zip(axes, plot_items)):
+        xs = np.arange(len(thr))
+        ax.plot(xs, thr, color=colors[i], linewidth=1.5)
+        ax.set_ylabel(f"IL {il}", fontsize=PlotTheme.FONT_SIZE_MEDIUM)
+        apply_scientific_style(ax, minor_ticks=False)
 
-        # Overall title; keep subplots "flat" by minimal spacing
-        fig.suptitle("Throughput per interference", y=0.99)
-        plt.tight_layout(rect=[0, 0, 1, 0.97])
+    # Bottom subplot gets the x label
+    axes[-1].set_xlabel("Sample Index", fontsize=PlotTheme.FONT_SIZE_MEDIUM)
 
-        out_path = out_dir / "thr_vals_by_interference_subplots.png"
-        fig.savefig(out_path)
-        print(f"[ok] Saved: {out_path}")
+    # Overall title; keep subplots "flat" by minimal spacing
+    fig.suptitle("Throughput per interference level", y=0.99)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+    # Save figure
+    out_path = out_dir / "thr_vals_by_interference_subplots.png"
+    save_figure(fig, out_path, dpi=PlotTheme.DPI_PUBLICATION)
+    print(f"[ok] Saved: {out_path}")
 
 
 
