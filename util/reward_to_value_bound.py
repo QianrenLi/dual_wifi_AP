@@ -9,11 +9,15 @@ class ValueDistribution:
         scale: float = 1.1,
         bins: int = 51,
         gamma: float = 0.99,
+        MAX_BITRATE = 3e7,
+        MAX_OUTAGE = 1.0,
     ):
         self.bins = bins
         self.bounds = self.get_bound(reward_cfg, gamma, scale=scale)
         self.value_bins = self.get_bin_value()   # python list
         self._value_bins_t: th.Tensor | None = None  # cached tensor version
+        self.MAX_BITRATE = MAX_BITRATE
+        self.MAX_OUTAGE = MAX_OUTAGE
 
     # --------- internal helpers --------- #
     def _value_bins_tensor(self, device=None, dtype=None) -> th.Tensor:
