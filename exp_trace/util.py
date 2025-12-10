@@ -443,6 +443,33 @@ class ExpTraceReader:
                 folders.sort(key=lambda x: x.name, reverse=True)
             latest[il_id] = folders[0]
         return latest
+    
+    def pick_last_k_per_il(
+        self,
+        k: int,
+        pattern: str = "IL_*_trial_*",
+        by_mtime: bool = True
+    ) -> Dict[int, List[Path]]:
+        if k < 0 or not self.meta_folder.is_dir():
+            return {}
+        runs = [p for p in self.meta_folder.glob(pattern) if p.is_dir()]
+        groups: Dict[int, List[Path]] = {}
+        for p in runs:
+            il_id, _ = self.extract_il_and_trial(p.name)
+            if il_id is None:
+                continue
+            groups.setdefault(il_id, []).append(p)
+
+        result: Dict[int, List[Path]] = {}
+        for il_id, folders in groups.items():
+            if not folders:
+                continue
+            if by_mtime:
+                folders.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+            else:
+                folders.sort(key=lambda x: x.name, reverse=True)
+            result[il_id] = folders[k]
+        return result
 
     def get_data(self, run_folder: Path) -> Tuple[Optional[Rollout], Optional[RttLog], Optional[ChannelLog]]:
         rollout     = FolderRollout(run_folder) 
