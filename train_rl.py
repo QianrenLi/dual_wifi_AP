@@ -114,7 +114,7 @@ def main():
         buffer_max=roll_cfg.get("buffer_max", 10_000_000),
         interference_vals = interference_vals,
         writer = writer,
-        capacity = 10000 if args.batch_rl else 50 * 3000 // 600,
+        capacity = 10000 if args.batch_rl else 1000,
     )
 
     # Policy
@@ -160,14 +160,9 @@ def main():
     store_int = 1000
     last_trained_time = time.time()
     while True:        
-        trained = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)    
-        res = _extend_with_new()
-        
-        if not trained:
-            time.sleep(1)
-            continue
+        no_need_update = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
         epoch += 1
-        
+                
         # Actor drift
         actor_after = _flatten_params(policy.net.actor_parameters())
         delta = float((actor_after - actor_before).norm(p=2).item())
@@ -184,6 +179,11 @@ def main():
             policy.save(store_path)
             next_id += 1
             store_path = ckpt_dir / f"{next_id}.pt"
+            
+        if not no_need_update:
+            time.sleep(1)
+            res = _extend_with_new()
+            continue
 
 
 if __name__ == "__main__":
