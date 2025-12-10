@@ -7,7 +7,7 @@ import importlib
 import matplotlib.pyplot as plt
 
 from net_util.base import PolicyBase
-from net_util.rnn_replay_with_pri_2 import RNNPriReplayBuffer2
+from net_util.rnn_replay_fifo import RNNPriReplayFiFo
 from net_util.model.sac_rnn_belief_seq_dist_v8 import Network
 from util.reward_to_value_bound import ValueDistribution
 from . import register_policy, register_policy_cfg
@@ -96,7 +96,7 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         self,
         cmd_cls: Any,
         cfg: SACRNNBeliefSeqDistV10_Config,
-        rollout_buffer: RNNPriReplayBuffer2 | None = None,
+        rollout_buffer: RNNPriReplayFiFo | None = None,
         device: str | None = None,
         state_transform_dict: dict | None = None,
         reward_cfg: Optional[dict] = None,
@@ -111,8 +111,15 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         
         bins = 51
 
-        net_mod = importlib.import_module(cfg.network_module_path)
-        net_class = getattr(net_mod, "Network")
+        try:
+            net_mod = importlib.import_module(cfg.network_module_path)
+            net_class = getattr(net_mod, "Network")
+        except (ImportError, AttributeError) as e:
+            raise RuntimeError(
+                f"Failed to import Network class from {cfg.network_module_path}. "
+                f"Error: {e}. Please check the module path and ensure the Network class exists."
+            ) from e
+
         self.net: Network = net_class(cfg.obs_dim, cfg.act_dim, bins=bins, belief_dim=cfg.belief_dim).to(self.device)  # type: ignore
 
         self.buf = rollout_buffer
@@ -278,6 +285,25 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         if "critic_param_norm" in kwargs:
             writer.add_scalar("param_norm/critic", kwargs["critic_param_norm"], step)
 
+        dbg = getattr(self, "_last_debug", None)
+        if dbg is not None and self._global_step % self.cfg.log_interval == 0:
+            writer.add_scalar("debug/q_mean", dbg["q_mean"], self._global_step)
+            writer.add_scalar("debug/backup_mean", dbg["backup_mean"], self._global_step)
+            writer.add_scalar("debug/dq_backup_minus_q", dbg["dq"], self._global_step)
+
+        bdbg = getattr(self.net, "_backup_debug", None)
+        if bdbg is not None and self._global_step % self.cfg.log_interval == 0:
+            writer.add_scalar("backup/r_mean", bdbg["r_mean"], self._global_step)
+            writer.add_scalar("backup/v_part_mean", bdbg["v_part_mean"], self._global_step)
+            writer.add_scalar("backup/ent_part_mean", bdbg["ent_part_mean"], self._global_step)
+            writer.add_scalar("backup/z_trunc_mean", bdbg["z_trunc_mean"], self._global_step)
+            
+        actordbg = getattr(self, "_actor_debug", None)
+        if actordbg is not None and self._global_step % self.cfg.log_interval == 0:
+            writer.add_scalar("actor_debug/weight_logp", actordbg["weight_logp"], self._global_step)
+            writer.add_scalar("actor_debug/weight_q", actordbg["weight_q"], self._global_step)
+
+
     def _belief_loss(
         self,
         y_hat_TBK: Tensor,
@@ -343,6 +369,23 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         z_TBCN = self.net.critic_compute(feat_TBH, act_TBA)  # [T,B,C,N]
         T, B, C, N = z_TBCN.shape
         
+        with th.no_grad():
+            # critic mean Q for training actions
+            q_TBC = z_TBCN.mean(dim=-1)                     # [T,B,C]
+            q_mean_TB1 = q_TBC.mean(dim=-1, keepdim=True)  # [T,B,1]
+            
+            # backup mean
+            backup_mean_TB1 = backup_q_TB1.mean(dim=-1, keepdim=True)  # [T,B,1]
+
+            # difference: if negative on average, backups are below current Q
+            dq_TB1 = backup_mean_TB1 - q_mean_TB1          # [T,B,1]
+
+            self._last_debug = {
+                "q_mean": q_mean_TB1.mean().item(),
+                "backup_mean": backup_mean_TB1.mean().item(),
+                "dq": dq_TB1.mean().item(),
+            }
+        
         taus = (2 * th.arange(1, N+1, device=z_TBCN.device) - 1) / (2.0 * N)
 
         loss_TBC = quantile_huber_loss(z_TBCN, backup_q_TB1, taus)   # [T,B,C]
@@ -354,17 +397,39 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         return c_loss, c_loss_batch.detach(), {}
     
 
-    def _actor_loss(self, feat_TBH: Tensor, a_pi_TBA: Tensor, logp_TB1: Tensor, returns_train: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    def _actor_loss(
+        self,
+        feat_TBH: Tensor,
+        a_pi_TBA: Tensor,
+        logp_TB1: Tensor,
+        returns_train: Tensor
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         alpha = self._alpha()
         z_TBCN = self.net.critic_compute(feat_TBH, a_pi_TBA)   # [T,B,C,N]
 
         q_TBC = z_TBCN.mean(dim=-1)                            # [T,B,C]
-        qmin_pi = q_TBC.mean(dim=-1, keepdim=True)           # [T,B,1]
+        qmin_pi = q_TBC.mean(dim=-1, keepdim=True)             # [T,B,1]
 
-        scale_value = self.update_actor_loss_scale(returns_train.detach()).item() / 3.3
-        a_loss = (alpha * logp_TB1 - (qmin_pi - returns_train.detach()) / max(scale_value, 1)).mean()
+        scale_value = self.update_actor_loss_scale(returns_train.detach()).item()
+        denom = max(scale_value, 1.0)
+
+        # two parts of the loss
+        loss_logp_TB1 = alpha * logp_TB1
+        loss_q_TB1 = -(qmin_pi - returns_train.detach()) / denom
+
+        # total actor loss
+        a_loss = (loss_logp_TB1 + loss_q_TB1).mean()
 
         qdist_avg = z_TBCN.mean(dim=(0, 1, 2)).detach()        # [N]
+
+        # diagnostics: magnitude of each term
+        weight_logp = loss_logp_TB1.abs().mean().detach()      # scalar
+        weight_q = loss_q_TB1.abs().mean().detach()            # scalar
+        
+        self._actor_debug = {
+            "weight_logp": weight_logp.item(),
+            "weight_q": weight_q.item(),
+        }
 
         return a_loss, qmin_pi.detach(), qdist_avg
 
@@ -533,7 +598,7 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
             importance_weights,
             b_h=h_burn,
             f_h_critic=f_h_burn_critic,
-            f_h_actor = f_h_burn_actor,
+            f_h_actor=f_h_burn_actor,
         )
         self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=10.0)
         self.net.soft_sync(self.cfg.tau)
@@ -681,6 +746,7 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
             "belief_opt_state_dict": self.belief_opt.state_dict(),
             "log_alpha": self.log_alpha,
             "alpha_opt_state_dict": self.alpha_opt.state_dict() if self.alpha_opt else None,
+            "alpha_lr": self.alpha_opt.param_groups[0]['lr'] if self.alpha_opt else None,
             "cfg": self.cfg,
             "global_step": self._global_step,
         }
@@ -700,7 +766,9 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         if loaded_log_alpha is not None:
             self.log_alpha = loaded_log_alpha.to(device_obj)
             if self.alpha_opt is None:
-                self.alpha_opt = th.optim.Adam([self.log_alpha], lr=self.cfg.lr)
+                # Use saved learning rate if available, otherwise use cfg.lr
+                saved_lr = checkpoint.get("alpha_lr", self.cfg.lr)
+                self.alpha_opt = th.optim.Adam([self.log_alpha], lr=saved_lr)
             alpha_opt_state = checkpoint.get("alpha_opt_state_dict", None)
             if alpha_opt_state:
                 self.alpha_opt.load_state_dict(alpha_opt_state)

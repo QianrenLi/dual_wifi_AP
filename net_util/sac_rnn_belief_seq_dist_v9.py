@@ -58,6 +58,9 @@ class SACRNNBeliefSeqDistV9_Config:
     annealing_max_lb: float = 2e-3
     annealing_epoch_max: float = 10
     sigma_k = 0.1
+    
+    MAX_BITRATE = 3e7
+    MAX_OUTAGE = 1.0
 
 
 @register_policy
@@ -102,7 +105,7 @@ class SACRNNBeliefSeqDistV9(PolicyBase):
             alpha_val = float(cfg.ent_coef) if isinstance(cfg.ent_coef, float) else 0.2
             self.alpha_tensor = th.tensor(alpha_val, device=self.device)
 
-        self.vd = ValueDistribution(reward_cfg=self.reward_cfg, bins=bins, gamma=self.cfg.gamma)
+        self.vd = ValueDistribution(reward_cfg=self.reward_cfg, bins=bins, gamma=self.cfg.gamma, MAX_BITRATE=self.cfg.MAX_BITRATE, MAX_OUTAGE=self.cfg.MAX_OUTAGE)
         
         self._upd = 0
         self._global_step = 0

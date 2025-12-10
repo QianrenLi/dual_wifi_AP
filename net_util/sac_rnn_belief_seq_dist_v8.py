@@ -439,7 +439,7 @@ class SACRNNBeliefSeqDistV8(PolicyBase):
         is_trained = False
         # --- Main Batch Loop ---
         burn_in = 50
-
+        
         # 1. Get longer sequence
         obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = next(self.buf.get_sequences(self.cfg.batch_size, trace_length=100))
 

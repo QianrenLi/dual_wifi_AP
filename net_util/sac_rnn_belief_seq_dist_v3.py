@@ -140,7 +140,8 @@ class SACRNNBeliefSeqDistV3(PolicyBase):
             return max_beta
         
         # Linear ramp from 0.0 to max_beta
-        return max(max_beta * (epoch / warmup_steps), 0)
+        # return max(max_beta * (epoch / warmup_steps), 0)
+        return 0
 
     
     # @debug_param_change
@@ -312,117 +313,85 @@ class SACRNNBeliefSeqDistV3(PolicyBase):
         writer.add_histogram("z_importance/feat_delta_l2_hist",
                              imp_TB.detach().cpu().view(-1), step)
 
-    def _probe_z_gradient_importance(
+    @th.no_grad()
+    def _probe_z_ablation_action(
         self,
         obs_TBD: Tensor,
-        act_TBA: Tensor,
         h_burn: Tensor,
         f_h_burn: Tensor,
         writer: Optional[SummaryWriter],
         step: int,
+        noise_std: float = 0.0,
     ) -> None:
         """
-        Gradient-based importance: how sensitive the mean Q is to obs vs z.
+        Measure importance of z by comparing *actions* with real z vs ablated / perturbed z.
 
-        We:
-          - compute z from belief_encode (no grad)
-          - treat obs and z as independent inputs to feature_compute with grad
-          - compute mean Q under dataset actions
-          - backprop to get ∂Q/∂obs and ∂Q/∂z
+        Pipeline:
+            z_BH           = belief_encode(obs_TBD, h_burn)
+            feat_TBH       = feature_compute(obs_TBD, z_BH, f_h_burn)
+            a_pi_TBA, _    = action_compute(feat_TBH, is_evaluate=True)
+
         Logs:
-          z_importance/grad_norm_obs
-          z_importance/grad_norm_z
-          z_importance/grad_ratio_z   (z / (obs+z))
+        z_importance/act_delta_l2_ablate     : mean L2 change in action (z vs zero-z)
+        z_importance/act_rel_delta_ablate    : mean relative change in action
+        z_importance/act_delta_l2_noise_*    : mean L2 change for z vs (z + noise)
+        z_importance/act_rel_delta_noise_*   : mean relative change for noisy z
         """
         if writer is None:
             return
 
-        self.net.zero_grad(set_to_none=True)
+        # 1) Get z from belief encoder (no grad, just a probe)
+        z_BH, _, _, _ = self.net.belief_encode(obs_TBD, b_h=h_burn)      # [T,B,H_z] or [B,H_z] depending on impl
 
-        # 1) Get z from belief encoder (no grad to avoid touching belief net)
-        with th.no_grad():
-            z_BH_raw, _, _, _ = self.net.belief_encode(obs_TBD, b_h=h_burn)
+        # 2) Features + actions with real z
+        feat_full_TBH, _ = self.net.feature_compute(obs_TBD, z_BH, f_h_burn)  # [T,B,H]
+        # Use deterministic / eval mode to reduce sampling noise
+        a_full_TBA, _ = self.net.action_compute(feat_full_TBH, is_evaluate=True)  # [T,B,A]
 
-        # 2) Inputs for feature_compute with grad
-        obs_feat = obs_TBD.detach().clone().requires_grad_(True)    # [T,B,D_obs]
-        z_BH = z_BH_raw.detach().clone().requires_grad_(True)       # [B,H_latent] or compatible
+        # ----------------- A) Pure ablation: z -> 0 ----------------- #
+        z_zero_BH = th.zeros_like(z_BH)
+        feat_noz_TBH, _ = self.net.feature_compute(obs_TBD, z_zero_BH, f_h_burn)
+        a_noz_TBA, _ = self.net.action_compute(feat_noz_TBH, is_evaluate=True)
 
-        # 3) Features from obs & z
-        feat_TBH, _ = self.net.feature_compute(obs_feat, z_BH, f_h_burn)
+        # L2 distance in action space as "impact" of z
+        delta_ablate_TBA = a_full_TBA - a_noz_TBA                     # [T,B,A]
+        imp_ablate_TB = delta_ablate_TBA.pow(2).sum(dim=-1).sqrt()    # [T,B]
+        imp_ablate_scalar = imp_ablate_TB.mean().item()
 
-        # 4) Critic Q-values on dataset actions
-        q_TB1K, q_TB1K2 = self.net.critic_compute(feat_TBH, act_TBA)         # [T,B,K]
-        q_mean_TB1 = th.min(self.vd.mean_value(q_TB1K), self.vd.mean_value(q_TB1K2))          # [T,B,1] (your current API)
-        scalar = -q_mean_TB1.mean()                                 # maximize Q -> minimize -Q
+        # Relative importance (normalized by action norm)
+        act_norm_TB = a_full_TBA.norm(dim=-1) + 1e-8                  # [T,B]
+        rel_imp_ablate = (imp_ablate_TB / act_norm_TB).mean().item()
 
-        scalar.backward()
+        writer.add_scalar("z_importance/act_delta_l2_ablate",
+                        imp_ablate_scalar, step)
+        writer.add_scalar("z_importance/act_rel_delta_ablate",
+                        rel_imp_ablate, step)
 
-        grad_obs_TBD = obs_feat.grad                                # [T,B,D_obs]
-        grad_z_BH    = z_BH.grad                                    # [B,H_latent or ...]
+        writer.add_histogram("z_importance/act_delta_l2_ablate_hist",
+                            imp_ablate_TB.detach().cpu().view(-1), step)
 
-        # If z is [B,H], broadcast it over T for a comparable norm
-        if grad_z_BH is not None:
-            grad_z_TBH = grad_z_BH
-            grad_z_norm = grad_z_TBH.norm(dim=-1).mean().item()     # scalar
-        else:
-            grad_z_norm = 0.0
+        # ----------------- B) Perturbation: z -> z + noise ----------------- #
+        if noise_std > 0.0:
+            z_noise_BH = z_BH + noise_std * th.randn_like(z_BH)
+            feat_noise_TBH, _ = self.net.feature_compute(obs_TBD, z_noise_BH, f_h_burn)
+            a_noise_TBA, _ = self.net.action_compute(feat_noise_TBH, is_evaluate=True)
 
-        grad_obs_norm = grad_obs_TBD.norm(dim=-1).mean().item()     # scalar
+            delta_noise_TBA = a_full_TBA - a_noise_TBA                   # [T,B,A]
+            imp_noise_TB = delta_noise_TBA.pow(2).sum(dim=-1).sqrt()     # [T,B]
+            imp_noise_scalar = imp_noise_TB.mean().item()
 
-        ratio = grad_z_norm / (grad_z_norm + grad_obs_norm + 1e-8)
+            rel_imp_noise = (imp_noise_TB / act_norm_TB).mean().item()
 
-        writer.add_scalar("z_importance/grad_norm_obs", grad_obs_norm, step)
-        writer.add_scalar("z_importance/grad_norm_z",   grad_z_norm,   step)
-        writer.add_scalar("z_importance/grad_ratio_z",  ratio,         step)
-        
-        self.net.zero_grad(set_to_none=True)
+            tag_suffix = f"{noise_std:g}"
 
-    @th.no_grad()
-    def _probe_z_weight_importance(
-        self,
-        writer: Optional[SummaryWriter],
-        step: int,
-    ) -> None:
-        """
-        Inspect first layer of feature extractor to see how much weight is on z vs obs.
+            writer.add_scalar(f"z_importance/act_delta_l2_noise_{tag_suffix}",
+                            imp_noise_scalar, step)
+            writer.add_scalar(f"z_importance/act_rel_delta_noise_{tag_suffix}",
+                            rel_imp_noise, step)
 
-        Assumes:
-          self.net.fe.mlp[0] is nn.Linear with input dim = obs_dim + belief_dim
+            writer.add_histogram(f"z_importance/act_delta_l2_noise_{tag_suffix}_hist",
+                                imp_noise_TB.detach().cpu().view(-1), step)
 
-        Logs:
-          z_importance/weight_norm_obs
-          z_importance/weight_norm_z
-          z_importance/weight_ratio_z   (z / (obs+z))
-        """
-        if writer is None:
-            return
-
-        fe = getattr(self.net, "fe", None)
-        if fe is None or not hasattr(fe, "mlp"):
-            return
-
-        first = fe.mlp[0]
-        if not isinstance(first, th.nn.Linear):
-            return
-
-        W = first.weight.data       # [H_out, D_in = obs_dim + belief_dim]
-
-        obs_dim = int(self.cfg.obs_dim)
-        z_dim   = int(self.cfg.belief_dim)
-        if W.shape[1] < obs_dim + z_dim:
-            # Safety check: unexpected shape, don't crash
-            return
-
-        W_obs = W[:, :obs_dim]
-        W_z   = W[:, obs_dim:obs_dim + z_dim]
-
-        norm_obs = W_obs.norm().item()
-        norm_z   = W_z.norm().item()
-        ratio    = norm_z / (norm_z + norm_obs + 1e-8)
-
-        writer.add_scalar("z_importance/weight_norm_obs", norm_obs, step)
-        writer.add_scalar("z_importance/weight_norm_z",   norm_z,   step)
-        writer.add_scalar("z_importance/weight_ratio_z",  ratio,    step)
 
     ## Train
     def train_per_epoch(
@@ -506,8 +475,7 @@ class SACRNNBeliefSeqDistV3(PolicyBase):
             
         if self._global_step % (self.cfg.log_interval * 10) == 0:
             self._probe_z_ablation_feature(obs_train, h_burn, f_h_burn, writer, self._global_step)
-            self._probe_z_gradient_importance(obs_train, act_train, h_burn, f_h_burn, writer, self._global_step)
-            self._probe_z_weight_importance(writer, self._global_step)
+            self._probe_z_ablation_action(obs_train, h_burn, f_h_burn, writer, self._global_step, noise_std=0.1)
 
         self._global_step += 1
         # self.buf.update_episode_losses(info["ep_ids"], c_loss_batch.cpu().numpy()) # type: ignore

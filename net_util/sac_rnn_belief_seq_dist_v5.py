@@ -113,7 +113,7 @@ class SACRNNBeliefSeqDistV5(PolicyBase):
             alpha_val = float(cfg.ent_coef) if isinstance(cfg.ent_coef, float) else 0.2
             self.alpha_tensor = th.tensor(alpha_val, device=self.device)
 
-        self.vd = ValueDistribution(reward_cfg=self.reward_cfg, bins=bins)
+        self.vd = ValueDistribution(reward_cfg=self.reward_cfg, bins=bins, gamma=self.cfg.gamma)
         
         self._upd = 0               # number of critic updates
         self._global_step = 0       # training step index

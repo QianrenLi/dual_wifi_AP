@@ -107,7 +107,7 @@ class SACRNNBeliefSeqDistV6(PolicyBase):
         self.target_entropy: float | None = None
         if cfg.ent_coef == "auto" and not cfg.batch_rl:
             self.log_alpha = th.tensor([cfg.ent_coef_init], device=self.device).log().requires_grad_(True)
-            self.alpha_opt = th.optim.Adam([self.log_alpha], lr=cfg.lr * 10)
+            self.alpha_opt = th.optim.Adam([self.log_alpha], lr=cfg.lr)
             self.target_entropy = -float(cfg.act_dim) if cfg.target_entropy == "auto" else float(cfg.target_entropy)
         else:
             alpha_val = float(cfg.ent_coef) if isinstance(cfg.ent_coef, float) else 0.2
@@ -466,7 +466,7 @@ class SACRNNBeliefSeqDistV6(PolicyBase):
         a_pi_TBA, logp_TB1 = self.net.action_compute( feat_TBH )
         
         # Alpha update
-        if self.alpha_opt is not None:
+        if self.alpha_opt is not None and self._global_step % 5 == 0:
             ent_loss = self._alpha_loss(logp_TB1)
             self._step_with_clip( [self.log_alpha], self.alpha_opt, ent_loss, clip_norm=5.0 ) # type: ignore
         
@@ -474,7 +474,7 @@ class SACRNNBeliefSeqDistV6(PolicyBase):
         c_loss, c_loss_batch = self._critic_loss(
             feat_TBH, act_train, nxt_train, rew_train, done_train, importance_weights, b_h=h_burn, f_h=f_h_burn
         )
-        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=5.0)
+        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=10.0)
         self.net.soft_sync(self.cfg.tau)
 
         # Actor update
