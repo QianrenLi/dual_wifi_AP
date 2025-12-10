@@ -233,6 +233,22 @@ class Network(nn.Module):
         total_dropped = self.dropped_per_critic * C
         total_kept = total_atoms - total_dropped
         z_trunc = z_sorted[..., :total_kept]
+        
+        z_trunc_mean_TB1 = z_trunc.mean(dim=-1, keepdim=True)  # [T,B,1]
+        ent_TB1 = alpha * logp_TB1                             # [T,B,1]
+
+        v_part_TB1 = gamma * (1.0 - d_TB1) * z_trunc_mean_TB1
+        ent_part_TB1 = -gamma * (1.0 - d_TB1) * ent_TB1
+        r_part_TB1 = r_TB1
+
+        # for logging
+        self._backup_debug = {
+            "r_mean": r_part_TB1.mean().item(),
+            "v_part_mean": v_part_TB1.mean().item(),
+            "ent_part_mean": ent_part_TB1.mean().item(),
+            "z_trunc_mean": z_trunc_mean_TB1.mean().item(),
+        }
+
 
         target_atoms = r_TB1 + gamma * (1.0 - d_TB1) * (z_trunc - alpha * logp_TB1)
         return target_atoms

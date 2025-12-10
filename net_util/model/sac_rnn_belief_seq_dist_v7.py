@@ -67,8 +67,12 @@ class Network(nn.Module):
 
         # Actor
         self.fe                 = FeatureExtractorGRU(obs_dim, hidden)
-        self.mu                 = nn.Linear(hidden + belief_dim, act_dim)
-        self.logstd_head        = nn.Linear(hidden + belief_dim, act_dim)
+        self.actor_l1           = nn.Sequential(
+            nn.Linear(hidden + belief_dim, hidden),
+            nn.GELU(),
+        )
+        self.mu                 = nn.Linear(hidden, act_dim)
+        self.logstd_head        = nn.Linear(hidden, act_dim)
         # self.logstd_head        = nn.Parameter(th.full((act_dim,), init_log_std))
 
         self._init_weights(init_log_std)
@@ -143,7 +147,8 @@ class Network(nn.Module):
         return  th.cat([feat, latent], dim=-1), f_h_n # [T,B,H]
 
     def action_compute(self, feat: th.Tensor, is_evaluate: bool = False, return_stats: bool = False):
-        feat = feat / feat.norm(p=1, dim=-1, keepdim=True).clamp_min(1e-8)
+        feat = self.actor_l1(feat)
+        # feat = feat / feat.norm(p=1, dim=-1, keepdim=True).clamp_min(1e-8)
         mean_action = self.mu(feat)
         logstd = self.logstd_head(feat)
         std = 1e-3 + (1 - 1e-3) * F.sigmoid(logstd)
@@ -199,19 +204,13 @@ class Network(nn.Module):
 
         q1_logits = q1_logits.clamp(-10.0, 10.0)
         q2_logits = q2_logits.clamp(-10.0, 10.0)
-        
+
         q1_dist = F.softmax(q1_logits, dim=-1)
         q2_dist = F.softmax(q2_logits, dim=-1)
-        
-        q1_mean = vd.mean_value(q1_dist)  # shape [T,B,1]
-        q2_mean = vd.mean_value(q2_dist)  # shape [T,B,1]
 
-        use_q1 = (q1_mean < q2_mean).float()      # [T,B,1]
-        q_target_dist = use_q1 * q1_dist + (1 - use_q1) * q2_dist
+        q_avg_dist = 0.5 * (q1_dist + q2_dist)
         
-        target_dist = vd.soft_target_distribution(
-            q_target_dist, r_TB1, d_TB1, gamma, alpha * logp_TB1
-        )
+        target_dist = vd.soft_target_distribution(q_avg_dist, r_TB1, d_TB1, gamma, alpha * logp_TB1)
         
         return target_dist
 
@@ -227,7 +226,7 @@ class Network(nn.Module):
 
     # param groups
     def actor_parameters(self):
-        return list(self.mu.parameters()) + list(self.logstd_head.parameters())
+        return list(self.mu.parameters()) + list(self.logstd_head.parameters()) + list(self.actor_l1.parameters())
     
     def critic_parameters(self):
         return list(self.q1.parameters()) + list(self.q2.parameters()) + list(self.fe.parameters()) 
