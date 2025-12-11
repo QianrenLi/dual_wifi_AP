@@ -336,6 +336,7 @@ def parse_args() -> Tuple[AgentConfig, PolicyBase]:
         baseline_policy = BASELINE_REGISTRY[cfg.baseline](
             state_cfg = control_config['state_cfg'],
             initial_cmd = cfg.initial_cmd,
+            reward_cfg = control_config.get('reward_cfg', None),
         )
         pass
     print(cfg)
