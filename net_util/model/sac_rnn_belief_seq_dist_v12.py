@@ -66,7 +66,7 @@ class Network(nn.Module):
         log_std_min: float = -20.0,
         log_std_max: float = 2.0,
         n_critics: int = 2,
-        dropped_per_critic: int = 5,
+        dropped_per_critic: int = 3,
     ):
         super().__init__()
         self.log_std_min, self.log_std_max = float(log_std_min), float(log_std_max)
@@ -76,7 +76,7 @@ class Network(nn.Module):
 
         def _make_q():
             return nn.Sequential(
-                nn.Linear(hidden + act_dim, hidden),
+                nn.Linear(obs_dim + belief_dim + act_dim, hidden),
                 nn.GELU(),
                 nn.Linear(hidden, hidden),
                 nn.GELU(),
@@ -87,14 +87,10 @@ class Network(nn.Module):
         self.belief_decoder = nn.Sequential(
             nn.Linear(belief_dim, belief_labels_dim),
         )
-        
-        self.feature_extractor = nn.Sequential(
-            nn.Linear(obs_dim + belief_dim, hidden),
-            nn.GELU(),
-        )
-        # print(obs_dim, belief_dim, hidden)
+
+        # Actor takes [obs, belief] as input
         self.actor_head = nn.Sequential(
-            nn.Linear(hidden, hidden),
+            nn.Linear(obs_dim + belief_dim, hidden),
             nn.GELU(),
             nn.Linear(hidden, act_dim * 2),
         )
@@ -153,22 +149,18 @@ class Network(nn.Module):
     def belief_decode(self, latent: th.Tensor) -> th.Tensor:
         return self.belief_decoder(latent)
 
-    def feature_compute(
-        self,
-        obs: th.Tensor,
-        latent: th.Tensor,
-    ) -> Tuple[th.Tensor, th.Tensor]:
-        feat = self.feature_extractor(th.cat([obs, latent], dim=-1))
-        return feat
-
+    
 
     def action_compute(
         self,
-        feat: th.Tensor,
+        obs: th.Tensor,
+        latent: th.Tensor,
         is_evaluate: bool = False,
         return_stats: bool = False
     ):
-        x = self.actor_head(feat)
+        # Actor now takes [obs, latent] as input
+        x = th.cat([obs, latent], dim=-1)
+        x = self.actor_head(x)
         u, dist, mean_action, std = reparameterize(x, is_evaluate=is_evaluate)
         normal_log = dist.log_prob(u).sum(-1, True)
         logp_n = normal_log - self._tanh_log_det(u).sum(-1, True)
@@ -177,8 +169,9 @@ class Network(nn.Module):
             return a, logp_n, mean_action, std
         return a, logp_n
 
-    def critic_compute(self, feat: th.Tensor, a: th.Tensor) -> th.Tensor:
-        x = th.cat([feat, a], dim=-1)
+    def critic_compute(self, obs: th.Tensor, latent: th.Tensor, a: th.Tensor) -> th.Tensor:
+        # Critic now takes [obs, latent, action] as input
+        x = th.cat([obs, latent, a], dim=-1)
         zs = []
         for q in self.critics:
             zs.append(q(x).unsqueeze(-2))
@@ -196,13 +189,13 @@ class Network(nn.Module):
     ) -> th.Tensor:
         z_TBH, _, _, _ = self.belief_encode(nxt_TBD, b_h, is_evaluate=True)
 
-        feat_actor_TBH = self.feature_compute(nxt_TBD, z_TBH)
-        a_TBA, logp_TB1 = self.action_compute(feat_actor_TBH, is_evaluate=False)
+        # Actor now takes obs and latent directly
+        a_TBA, logp_TB1 = self.action_compute(nxt_TBD, z_TBH, is_evaluate=False)
 
-        xa = th.cat([feat_actor_TBH, a_TBA], dim=-1)
+        # Critic takes [obs, latent, action] as input
         z_list = []
         for qt in self.critics_t:
-            z_list.append(qt(xa).unsqueeze(2))
+            z_list.append(qt(th.cat([nxt_TBD, z_TBH, a_TBA], dim=-1)).unsqueeze(2))
         z_cat = th.cat(z_list, dim=-2)
 
         T, B, C, N = z_cat.shape
@@ -245,10 +238,7 @@ class Network(nn.Module):
                 p.requires_grad_(f)
 
     def actor_parameters(self):
-        return (
-            list(self.feature_extractor.parameters())
-            + list(self.actor_head.parameters())
-        )
+        return list(self.actor_head.parameters())
 
     def critic_parameters(self):
         crit_params = []

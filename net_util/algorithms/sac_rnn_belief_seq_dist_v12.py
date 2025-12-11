@@ -108,7 +108,7 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
         np.random.seed(cfg.seed)
         th.backends.cudnn.benchmark = True
         
-        bins = 51
+        bins = 26
 
         try:
             net_mod = importlib.import_module(cfg.network_module_path)
@@ -119,7 +119,7 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
                 f"Error: {e}. Please check the module path and ensure the Network class exists."
             ) from e
 
-        self.net: Network = net_class(cfg.obs_dim, cfg.act_dim, bins=bins, belief_dim=cfg.belief_dim).to(self.device)  # type: ignore
+        self.net: Network = net_class(cfg.obs_dim, cfg.act_dim, bins=bins, belief_dim=cfg.belief_dim, n_critics = 5).to(self.device)  # type: ignore
 
         self.buf = rollout_buffer
 
@@ -322,7 +322,8 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
 
     def _critic_loss(
         self,
-        feat_TBH: Tensor,
+        obs_TBD: Tensor,
+        latent_TBH: Tensor,
         act_TBA: Tensor,
         nxt_TBD: Tensor,
         rew_TB1: Tensor,
@@ -340,8 +341,8 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
             b_h,
         )                        # [T,B,K_total_kept]
 
-        z_TBCN = self.net.critic_compute(feat_TBH, act_TBA)  # [T,B,C,N]
-        T, B, C, N = z_TBCN.shape
+        z_TBCN = self.net.critic_compute(obs_TBD, latent_TBH, act_TBA)  # [T,B,C,N]
+        _, _, _, N = z_TBCN.shape
         
         taus = (2 * th.arange(1, N+1, device=z_TBCN.device) - 1) / (2.0 * N)
 
@@ -355,13 +356,14 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
 
     def _actor_loss(
         self,
-        feat_TBH: Tensor,
+        obs_TBD: Tensor,
+        latent_TBH: Tensor,
         a_pi_TBA: Tensor,
         logp_TB1: Tensor,
         returns_train: Tensor
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         alpha = self._alpha()
-        z_TBCN = self.net.critic_compute(feat_TBH, a_pi_TBA)   # [T,B,C,N]
+        z_TBCN = self.net.critic_compute(obs_TBD, latent_TBH, a_pi_TBA)   # [T,B,C,N]
 
         q_TBC = z_TBCN.mean(dim=-1)                            # [T,B,C]
         qmin_pi = q_TBC.mean(dim=-1, keepdim=True)             # [T,B,1]
@@ -396,25 +398,28 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
         if writer is None:
             return
 
+        # Feature ablation is no longer relevant with the new architecture
+        # since features are computed on-the-fly in actor/critic
+        # This method now measures belief state importance indirectly
         z_BH, _, _, _ = self.net.belief_encode(obs_TBD, b_h=h_burn, is_evaluate=True)
 
-        feat_full_TBH = self.net.feature_compute(obs_TBD, z_BH)
-
+        # Compare actions with and without belief
+        a_full_TBA, _ = self.net.action_compute(obs_TBD, z_BH, is_evaluate=True)
         z_zero_BH = th.zeros_like(z_BH)
-        feat_noz_TBH = self.net.feature_compute(obs_TBD, z_zero_BH)
+        a_noz_TBA, _ = self.net.action_compute(obs_TBD, z_zero_BH, is_evaluate=True)
 
-        delta_TBH = feat_full_TBH - feat_noz_TBH
-        imp_TB = delta_TBH.pow(2).sum(dim=-1).sqrt()
+        delta_a_TBA = a_full_TBA - a_noz_TBA
+        imp_TB = delta_a_TBA.pow(2).sum(dim=-1).sqrt()
         imp_scalar = imp_TB.mean().item()
 
-        feat_norm_TB = feat_full_TBH.norm(dim=-1) + 1e-8
-        rel_imp_TB = (imp_TB / feat_norm_TB).mean().item()
+        act_norm_TB = a_full_TBA.norm(dim=-1) + 1e-8
+        rel_imp_TB = (imp_TB / act_norm_TB).mean().item()
 
         writer.add_scalar("z_importance/feat_delta_l2", imp_scalar, step)
         writer.add_scalar("z_importance/feat_rel_delta", rel_imp_TB, step)
 
         writer.add_histogram(
-            "z_importance/feat_delta_l2_hist",
+            "z_importance/belief_action_delta_l2_hist",
             imp_TB.detach().cpu().view(-1),
             step,
         )
@@ -433,12 +438,11 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
 
         z_BH, _, _, _ = self.net.belief_encode(obs_TBD, b_h=h_burn, is_evaluate=True)
 
-        feat_full_TBH = self.net.feature_compute(obs_TBD, z_BH)
-        a_full_TBA, _ = self.net.action_compute(feat_full_TBH, is_evaluate=True)
+        # Action now takes obs and latent directly
+        a_full_TBA, _ = self.net.action_compute(obs_TBD, z_BH, is_evaluate=True)
 
         z_zero_BH = th.zeros_like(z_BH)
-        feat_noz_TBH = self.net.feature_compute(obs_TBD, z_zero_BH)
-        a_noz_TBA, _ = self.net.action_compute(feat_noz_TBH, is_evaluate=True)
+        a_noz_TBA, _ = self.net.action_compute(obs_TBD, z_zero_BH, is_evaluate=True)
 
         delta_ablate_TBA = a_full_TBA - a_noz_TBA
         imp_ablate_TB = delta_ablate_TBA.pow(2).sum(dim=-1).sqrt()
@@ -495,16 +499,19 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
         z_BH, _, mu_BH, logvar_BH = self.net.belief_encode(
             obs_train, b_h=h_burn, is_evaluate=True
         )
-        
-        feat_TBH = self.net.feature_compute(obs_train, z_BH.detach())
-        a_pi_TBA, logp_TB1, mu_TBA, std_TBA = self.net.action_compute(feat_TBH, return_stats=True)
+
+        # Actor now takes obs and latent directly
+        a_pi_TBA, logp_TB1, mu_TBA, std_TBA = self.net.action_compute(
+            obs_train, z_BH.detach(), return_stats=True
+        )
         
         if self.alpha_opt is not None:
             ent_loss = self._alpha_loss(logp_TB1.detach())
             self._step_with_clip([self.log_alpha], self.alpha_opt, ent_loss, clip_norm=5.0)  # type: ignore
         
         c_loss, c_loss_batch, _ = self._critic_loss(
-            feat_TBH.detach(),
+            obs_train,
+            z_BH.detach(),
             act_train,
             nxt_train,
             rew_train,
@@ -514,9 +521,11 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
         )
         self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=10.0)
         self.net.soft_sync(self.cfg.tau)
-        
+
         with self.net.critics_frozen():
-            a_loss, qmin_pi, qdist_avg = self._actor_loss(feat_TBH, a_pi_TBA, logp_TB1, returns_train=returns_train)
+            a_loss, qmin_pi, qdist_avg = self._actor_loss(
+                obs_train, z_BH.detach(), a_pi_TBA, logp_TB1, returns_train=returns_train
+            )
             self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=5.0)
 
             mu_mean = mu_TBA.mean(dim=(0, 1))
@@ -635,9 +644,8 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
             * th.arange(y_hat_B1.shape[-1], device=self.device)
         ).sum(dim=-1, keepdim=True)
 
-        feat = self.net.feature_compute(obs, z_BH)
-        
-        action, logp = self.net.action_compute(feat, is_evaluate)
+        # Action now takes obs and latent directly
+        action, logp = self.net.action_compute(obs, z_BH, is_evaluate)
         v_like = 0
 
         self._belief_h = _belief_h.detach()
