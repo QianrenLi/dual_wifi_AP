@@ -9,6 +9,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY, BUFFER_REGISTRY
 from net_util.base import PolicyBase
+# Ensure all algorithms are imported
+import net_util.algorithms.sac_rnn_belief_seq_dist_v11
+import net_util.algorithms.sac_rnn_belief_seq_dist_v12
 from util.control_cmd import ControlCmd
 from util.trace_watcher import TraceWatcher
 
@@ -98,7 +101,7 @@ def main():
 
     # Trace watcher (multi-root, recursive *.jsonl)
     roots = _normalize_trace_paths(args.trace_path)
-    watcher = TraceWatcher(roots, control_cfg, max_step=10)
+    watcher = TraceWatcher(roots, control_cfg, max_step=3)
     init_traces, interference_vals = watcher.load_initial_traces()
     while init_traces == []:
         init_traces, interference_vals = watcher.load_initial_traces()
@@ -116,7 +119,7 @@ def main():
         buffer_max=roll_cfg.get("buffer_max", 10_000_000),
         interference_vals = interference_vals,
         writer = writer,
-        capacity = 10000 if args.batch_rl else 1000,
+        capacity = 10000 if args.batch_rl else 6000,
     )
 
     # Policy
@@ -197,7 +200,6 @@ def main():
             store_path = ckpt_dir / f"{next_id}.pt"
             
         if not no_need_update:
-            time.sleep(1)
             res = _extend_with_new()
             continue
 
