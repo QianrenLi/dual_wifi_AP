@@ -254,10 +254,10 @@ def plot_bar_simple(
         width=width,
         edgecolor="black",
         alpha=0.8,
-        linewidth=0.8,
+        linewidth=0.6,
         yerr=errors,
         capsize=4,
-        color=PlotTheme.get_color(0)
+        color=PlotTheme.get_color(2)
     )
 
     # Apply scientific styling
@@ -405,6 +405,7 @@ def main():
         title=None,
         ylabel="Throughput (Mb/s)",
         save_path=str(out_dir / "tput.pdf"),
+        figsize="portrait_small",
     )
     plot_bar_simple(
         out_mean * 100,
@@ -413,6 +414,7 @@ def main():
         ylabel="Outage (%)",
         save_path=str(out_dir / "outage.pdf"),
         y_limits_low=None,
+        figsize="portrait_small",
     )
     plot_bar_simple(
         rew_mean,
@@ -420,6 +422,7 @@ def main():
         title=None,
         ylabel="Reward",
         save_path=str(out_dir / "reward.pdf"),
+        figsize="portrait_small",
     )
 
     try:
