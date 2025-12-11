@@ -111,12 +111,12 @@ class RNNPriReplayEqualEp:
         gamma: float = 0.99,
         alpha: float = 0.3,  # Reduced from 0.7 to 0.3 for less aggressive prioritization
         beta0: float = 0.4,
-        rebalance_interval: int = 100,
+        rebalance_interval: int = 500,
         writer=None,
         episode_length: int = 600,
-        priority_mode: str = "mixed",  # New parameter: "loss", "reward", or "mixed"
-        loss_weight: float = 0.7,  # Weight for loss in mixed prioritization
-        reward_weight: float = 0.3,  # Weight for reward in mixed prioritization
+        priority_mode: str = "loss",  # New parameter: "loss", "reward", or "mixed"
+        loss_weight: float = 1.0,  # Weight for loss in mixed prioritization
+        reward_weight: float = 0.0,  # Weight for reward in mixed prioritization
         epsilon: float = 1e-6,  # Small constant to ensure non-zero priority
     ):
         self.device = th.device(device)
