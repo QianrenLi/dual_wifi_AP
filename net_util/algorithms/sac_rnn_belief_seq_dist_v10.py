@@ -4,13 +4,12 @@ import numpy as np
 import torch as th
 import torch.nn.functional as F
 import importlib
-import matplotlib.pyplot as plt
 
 from net_util.base import PolicyBase
-from net_util.rnn_replay_fifo import RNNPriReplayFiFo
+from net_util.replay.base import BaseReplayBuffer
 from net_util.model.sac_rnn_belief_seq_dist_v8 import Network
 from util.reward_to_value_bound import ValueDistribution
-from . import register_policy, register_policy_cfg
+from .. import register_policy, register_policy_cfg
 from torch.utils.tensorboard import SummaryWriter
 
 Tensor = th.Tensor
@@ -96,7 +95,7 @@ class SACRNNBeliefSeqDistV10(PolicyBase):
         self,
         cmd_cls: Any,
         cfg: SACRNNBeliefSeqDistV10_Config,
-        rollout_buffer: RNNPriReplayFiFo | None = None,
+        rollout_buffer: BaseReplayBuffer | None = None,
         device: str | None = None,
         state_transform_dict: dict | None = None,
         reward_cfg: Optional[dict] = None,

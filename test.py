@@ -399,6 +399,8 @@ def main():
     if args.exp_folder != "":
         folder = Path(f'{args.exp_folder}')
         paths = sorted(folder.rglob("*.py"), key=lambda p: int(p.stem) )
+        # Filter out base.py and __init__.py files
+        paths = [p for p in paths if p.name not in ('base.py', '__init__.py')]
     else:
         paths = [ Path("config") / f'{args.exp_name}.py' ]
     
