@@ -80,6 +80,8 @@ def main():
     ap.add_argument("--delta-min", type=float, default=5e-4)
     ap.add_argument("--delta-max", type=float, default=5)
     ap.add_argument("--batch-rl", action = 'store_true')
+    ap.add_argument("--reuse-traces", action='store_true',
+                    help="After all traces are loaded once, re-use existing traces for offline testing")
     args = ap.parse_args()
 
     cfg_stem = Path(args.control_config).parent.stem
@@ -143,6 +145,20 @@ def main():
 
     def _extend_with_new():
         new_traces, interference_vals = watcher.poll_new_traces()
+
+        # If no new traces and reuse is enabled, reload existing traces
+        if not new_traces and args.reuse_traces:
+            # Check if we have seen traces to reuse (after initial loading)
+            if len(watcher._seen) > 0:
+                print("[Trace Reuse] No new traces available, reusing existing traces...")
+                new_traces, interference_vals = watcher.reset_and_reload_all()
+                # Shuffle to vary the order
+                if new_traces:
+                    import random
+                    random.shuffle(new_traces)
+                    random.shuffle(interference_vals)
+                    print(f"[Trace Reuse] Reloaded {len(new_traces)} traces")
+
         if new_traces != []:
             policy.buf.extend(
                 new_traces,
@@ -188,13 +204,13 @@ def main():
 
 if __name__ == "__main__":
     # Example: generate test config files then run
-    import importlib.util
-    cfg_path = Path("/home/qianren/workspace/dual_wifi_AP/config/rnn_test_2.py")
-    spec = importlib.util.spec_from_file_location("exp_config", cfg_path)
-    cfg_mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(cfg_mod)
-    policy_configs = cfg_mod.policy_config()
+    # import importlib.util
+    # cfg_path = Path("/home/qianren/workspace/dual_wifi_AP/config/rnn_test_2.py")
+    # spec = importlib.util.spec_from_file_location("exp_config", cfg_path)
+    # cfg_mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(cfg_mod)
+    # policy_configs = cfg_mod.policy_config()
 
-    net_dir = Path("net_util/net_config/test_rnn_2"); net_dir.mkdir(parents=True, exist_ok=True)
-    with open(net_dir / "test.json", "w") as f:
-        json.dump(next(iter(next(iter(policy_configs.values())).values())), f, indent=4)
+    # net_dir = Path("net_util/net_config/test_rnn_2"); net_dir.mkdir(parents=True, exist_ok=True)
+    # with open(net_dir / "test.json", "w") as f:
+    #     json.dump(next(iter(next(iter(policy_configs.values())).values())), f, indent=4)
     main()

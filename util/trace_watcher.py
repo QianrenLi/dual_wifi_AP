@@ -6,7 +6,7 @@ import random
 from pathlib import Path
 from typing import Iterable, List, Tuple, Union, Optional, Sequence
 
-from util.trace_collec import trace_collec, flatten_leaves
+from util.trace_collec import trace_collec
 from net_util.state_transfom import _StateTransform
 
 
@@ -72,12 +72,8 @@ class TraceWatcher:
         """
         limit = self._resolve_limit(max_step)
         units = self._list_units()  # across all roots
-        candidates = [p for p in units if str(p.resolve()) not in self._seen]
-        random.shuffle(candidates)
-        to_load = candidates[:limit] if limit is not None else candidates
-
-        for p in to_load:
-            self._seen.add(str(p.resolve()))
+        candidates = self._filter_unseen(units)
+        to_load = self._select_and_mark_paths(candidates, limit)
         return self._load_units(to_load)
 
     def poll_new_paths(self, max_step: Optional[int] = None) -> List[Path]:
@@ -87,19 +83,8 @@ class TraceWatcher:
         """
         limit = self._resolve_limit(max_step)
         current = self._list_units()
-
-        new_candidates: List[Path] = []
-        for p in current:
-            p_str = str(p.resolve())
-            if p_str not in self._seen:
-                new_candidates.append(p)
-
-        random.shuffle(new_candidates)
-        to_take = new_candidates[:limit] if limit is not None else new_candidates
-
-        for p in to_take:
-            self._seen.add(str(p.resolve()))
-        return to_take
+        new_candidates = self._filter_unseen(current)
+        return self._select_and_mark_paths(new_candidates, limit)
 
     def poll_new_traces(self, max_step: Optional[int] = None) -> Tuple[List[Tuple[list, list, list, list]], List[int]]:
         """
@@ -120,7 +105,49 @@ class TraceWatcher:
     # -----------------------------
     def remaining_unseen_count(self) -> int:
         """How many '*.jsonl' files under all roots remain unseen."""
-        return sum(1 for p in self._list_units() if str(p.resolve()) not in self._seen)
+        return len(self._filter_unseen(self._list_units()))
+
+    def get_all_seen_paths(self) -> List[Path]:
+        """Return all trace file paths that have been seen so far."""
+        return [Path(p) for p in self._seen]
+
+    def reset_and_reload_all(self, max_step: Optional[int] = None) -> Tuple[List[Tuple[list, list, list, list]], List[int]]:
+        """Reset the seen tracker and reload all previously seen traces."""
+        all_paths = self.get_all_seen_paths()
+        self._seen.clear()  # Reset seen tracker
+        # Use _select_and_mark_paths but don't filter since we reset _seen
+        to_load = self._select_and_mark_paths(all_paths, max_step)
+        return self._load_units(to_load)
+
+    # -----------------------------
+    # Internals - Helper Methods
+    # -----------------------------
+    def _select_and_mark_paths(self, paths: List[Path], limit: Optional[int] = None) -> List[Path]:
+        """
+        Common helper to:
+        1. Shuffle paths randomly
+        2. Apply limit if provided
+        3. Mark selected paths as seen
+        4. Return selected paths
+        """
+        random.shuffle(paths)
+        selected = paths[:limit] if limit is not None else paths
+        self._mark_as_seen(selected)
+        return selected
+
+    def _mark_as_seen(self, paths: Iterable[Path]) -> None:
+        """Mark the given paths as seen."""
+        for p in paths:
+            self._seen.add(str(p.resolve()))
+
+    def _filter_unseen(self, paths: Iterable[Path]) -> List[Path]:
+        """Filter out paths that have already been seen."""
+        return [p for p in paths if str(p.resolve()) not in self._seen]
+
+    def _extract_interference_id(self, path: Path) -> int:
+        """Extract interference ID from path's parent directory name."""
+        res = re.search(self.id_regex, path.parent.stem)
+        return int(res.group(0)) if res else 0
 
     # -----------------------------
     # Internals
@@ -170,26 +197,24 @@ class TraceWatcher:
         merged: List[Tuple[list, list, list, list]] = []
         interference_vals: List[int] = []
 
-        # infer interference id from each path's parent dir name (same as before)
         for tp in paths:
-            res = re.search(self.id_regex, tp.parent.stem)
-            if res is None:
-                interference_vals.append(0)
-            else:
-                interference_vals.append(int(res.group(0)))
+            # Extract interference ID using helper method
+            interference_vals.append(self._extract_interference_id(tp))
+
             s, a, r, net = trace_collec(
                 str(tp),
                 state_descriptor=self.control_config.get("state_cfg", None),
                 reward_descriptor=self.control_config.get("reward_cfg", None),
             )
+
             ## TODO: make this hyperparameter
             if len(s) < 100:
                 continue
-            s_nor = []
+
+            # Apply state transformation if available
             if self._state_tf:
-                for _s in s:
-                    s_nor.append(self._state_tf.apply_to_list(_s))
-                s = s_nor
+                s = [self._state_tf.apply_to_list(_s) for _s in s]
+
             merged.append((s, a, r, net))
         return merged, interference_vals
 
