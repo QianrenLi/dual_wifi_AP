@@ -38,7 +38,7 @@ def _as_1d_float(x):
 def _reward_agg_fn(reward_agg):
     if reward_agg == "sum":  return lambda arr: float(np.asarray(arr, np.float32).sum())
     if reward_agg == "mean": return lambda arr: float(np.asarray(arr, np.float32).mean())
-    if callable(reward_agg): return lambda arr: float(reward_agg(np.asarray(arr, np.float32)))
+    if callable(reward_agg): return lambda arr: float(reward(np.asarray(arr, np.float32)))
     raise ValueError
 
 def _tracify(states, actions, rewards, network_output, reward_agg):
@@ -56,23 +56,23 @@ def _tracify(states, actions, rewards, network_output, reward_agg):
 
     agg = _reward_agg_fn(reward_agg)
     rew_np = np.asarray([agg(_as_1d_float(r)) for r in rewards], dtype=np.float32)
-    
+
     # Handle next_obs/done array creation
     next_obs_np = np.vstack([obs_np[1:], np.zeros((1, obs_np.shape[1]), np.float32)]) if T>0 else np.zeros((1, obs_np.shape[1]), np.float32)
     done_np = np.array([float(network_output[t].get("done",0)) for t in range(T)], dtype=np.float32)
     # if T > 0: done_np[-1] = 1.0
-    
+
     return obs_np, act_np, rew_np, next_obs_np, done_np
 
 # ---------------- episode (Modified to use NumPy) ----------------
 class Episode:
     __slots__ = ("obs_np","actions_np","rewards_np","next_obs_np","dones_np", "rets_np","loss",
                  "reward_summary","gamma_summary","avg_return","interference",
-                 "data_num","_heap_idx")
-                 
+                 "data_num","_heap_idx", "avg_reward")
+
     def __init__(self, obs_np, act_np, rew_np, next_obs_np, done_np,
                  init_loss: float, gamma: float, interference=0):
-        
+
         self.obs_np = obs_np
         self.actions_np = act_np
         self.rewards_np = rew_np
@@ -83,7 +83,7 @@ class Episode:
         self.reward_summary = summarize(rew_np)
         self.gamma_summary  = summarize((1 - done_np) * gamma)
         self.data_num = self.reward_summary[0]
-        
+
         # Calculate avg_return (variance of returns)
         G = 0.0
         rets_np = np.zeros(self.data_num, dtype=np.float32)
@@ -91,7 +91,10 @@ class Episode:
             G = float(rew_np[t]) + gamma * G * (1.0 - float(done_np[t]))
             rets_np[t] = G
         self.rets_np = rets_np
-        
+
+        # Store average reward for balanced prioritization
+        self.avg_reward = float(np.mean(rew_np))
+
         self.interference = float(interference)
         self._heap_idx = -1  # maintained by buffer
 
@@ -106,11 +109,15 @@ class RNNPriReplayEqualEp:
         device: str = "cuda",
         capacity: int = 10000,
         gamma: float = 0.99,
-        alpha: float = 0.7,
+        alpha: float = 0.3,  # Reduced from 0.7 to 0.3 for less aggressive prioritization
         beta0: float = 0.4,
         rebalance_interval: int = 100,
         writer=None,
         episode_length: int = 600,
+        priority_mode: str = "mixed",  # New parameter: "loss", "reward", or "mixed"
+        loss_weight: float = 0.7,  # Weight for loss in mixed prioritization
+        reward_weight: float = 0.3,  # Weight for reward in mixed prioritization
+        epsilon: float = 1e-6,  # Small constant to ensure non-zero priority
     ):
         self.device = th.device(device)
         self.capacity = int(capacity)
@@ -120,6 +127,10 @@ class RNNPriReplayEqualEp:
         self.rebalance_interval = int(rebalance_interval)
         self.writer = writer
         self.episode_length = episode_length
+        self.priority_mode = priority_mode
+        self.loss_weight = float(loss_weight)
+        self.reward_weight = float(reward_weight)
+        self.epsilon = float(epsilon)
 
         self.heap: List[Episode] = []
         self._fifo: List[Episode] = []
@@ -132,8 +143,60 @@ class RNNPriReplayEqualEp:
         self.data_num = 0
         self.sigma = 0.0
 
+        # Track statistics for monitoring
+        self._loss_stats = []
+        self._reward_stats = []
+
     def _key(self, ep: Episode) -> float:
-        return ep.loss
+        """Compute priority key based on the selected mode."""
+        if self.priority_mode == "loss":
+            # Original: prioritize by loss only
+            return ep.loss
+        elif self.priority_mode == "reward":
+            # Prioritize by absolute reward (both positive and negative)
+            return abs(ep.avg_reward) + self.epsilon
+        elif self.priority_mode == "mixed":
+            # Combine loss and reward for balanced prioritization
+            # Normalize loss and reward to [0, 1] range using running statistics
+            norm_loss = self._normalize_loss(ep.loss)
+            norm_reward = self._normalize_reward(ep.avg_reward)
+
+            # Higher loss gets higher priority, higher absolute reward gets higher priority
+            priority = (self.loss_weight * norm_loss +
+                       self.reward_weight * norm_reward +
+                       self.epsilon)
+            return priority
+        else:
+            raise ValueError(f"Unknown priority_mode: {self.priority_mode}")
+
+    def _normalize_loss(self, loss: float) -> float:
+        """Normalize loss using running statistics."""
+        if not self._loss_stats:
+            self._loss_stats = [loss]
+            return 1.0
+
+        # Keep only recent statistics
+        self._loss_stats = self._loss_stats[-1000:] + [loss]
+        mean_loss = np.mean(self._loss_stats)
+        std_loss = np.std(self._loss_stats) + 1e-8
+
+        # Normalize to [0, 1] using sigmoid
+        return 1 / (1 + np.exp(-(loss - mean_loss) / std_loss))
+
+    def _normalize_reward(self, reward: float) -> float:
+        """Normalize reward using running statistics."""
+        if not self._reward_stats:
+            self._reward_stats = [reward]
+            return 1.0
+
+        # Keep only recent statistics
+        self._reward_stats = self._reward_stats[-1000:] + [reward]
+        mean_reward = np.mean(self._reward_stats)
+        std_reward = np.std(self._reward_stats) + 1e-8
+
+        # Use absolute value and normalize to [0, 1] using sigmoid
+        abs_reward = abs(reward)
+        return 1 / (1 + np.exp(-(abs_reward - mean_reward) / std_reward))
 
     def _swap(self, i: int, j: int):
         self.heap[i], self.heap[j] = self.heap[j], self.heap[i]
@@ -190,10 +253,9 @@ class RNNPriReplayEqualEp:
         ep = self.heap[ep_idx]
         old = ep.loss
         ep.loss = float(new_loss)
-        if ep.loss > old:
-            self._sift_up(ep_idx)
-        else:
-            self._sift_down(ep_idx)
+        # Update the heap position based on new priority
+        self._sift_up(ep_idx)
+        self._sift_down(ep_idx)
 
     def _evict_leaf(self):
         while self._fifo:
@@ -207,7 +269,8 @@ class RNNPriReplayEqualEp:
         self._steps_since_rebalance += max(1, int(just_updated))
         if self._steps_since_rebalance >= self.rebalance_interval and len(self.heap) > 1:
             self._steps_since_rebalance = 0
-            self.heap.sort(key=lambda e: e.loss, reverse=True)
+            # Sort based on the priority key
+            self.heap.sort(key=lambda e: self._key(e), reverse=True)
             for i, ep in enumerate(self.heap):
                 ep._heap_idx = i
             for i in range((len(self.heap) >> 1) - 1, -1, -1):
@@ -227,11 +290,15 @@ class RNNPriReplayEqualEp:
             device=device,
             capacity=capacity,
             gamma=kwargs.get("gamma", 0.99),
-            alpha=kwargs.get("alpha", 0.7),
+            alpha=kwargs.get("alpha", 0.3),  # Reduced default
             beta0=kwargs.get("beta0", 0.4),
             rebalance_interval=kwargs.get("rebalance_interval", 100),
             writer=kwargs.get("writer", None),
             episode_length=episode_length,
+            priority_mode=kwargs.get("priority_mode", "mixed"),
+            loss_weight=kwargs.get("loss_weight", 0.7),
+            reward_weight=kwargs.get("reward_weight", 0.3),
+            epsilon=kwargs.get("epsilon", 1e-6),
         )
         interfs = kwargs.get("interference_vals", [0] * len(traces))
         for (states, actions, rewards, network_output), interf in zip(traces, interfs):
@@ -288,7 +355,7 @@ class RNNPriReplayEqualEp:
                 rew_np[start:end],
                 next_obs_np[start:end],
                 done_np[start:end],
-                init_loss=10000.0 if init_loss is None else float(init_loss),
+                init_loss=1.0 if init_loss is None else float(init_loss),  # Reduced from 10000.0
                 gamma=self.gamma,
                 interference=interference,
             )
@@ -301,11 +368,6 @@ class RNNPriReplayEqualEp:
                 self.data_num += 1
                 if self.writer is not None:
                     self.writer.add_scalar("data/return", self.run_return, self.data_num)
-
-            # self.sigma = math.sqrt(
-            #     max(0.0, var_unbiased(self.reward_summary))
-            #     + max(0.0, var_unbiased(self.gamma_summary)) * max(0.0, self.avg_return)
-            # )
 
             self._push(ep)
             if len(self.heap) > self.capacity:
@@ -414,7 +476,7 @@ class RNNPriReplayEqualEp:
         prob_B1 = th.from_numpy(probs_ep.astype(np.float32)).to(
             dev, non_blocking=True
         ).unsqueeze(-1)
-        
+
 
         info = {
             "ep_ids": ep_ids,
