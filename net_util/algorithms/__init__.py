@@ -4,6 +4,7 @@
 from .sac_rnn_belief_seq_dist_v8 import SACRNNBeliefSeqDistV8, SACRNNBeliefSeqDistV8_Config
 from .sac_rnn_belief_seq_dist_v9 import SACRNNBeliefSeqDistV9, SACRNNBeliefSeqDistV9_Config
 from .sac_rnn_belief_seq_dist_v10 import SACRNNBeliefSeqDistV10, SACRNNBeliefSeqDistV10_Config
+from .sac_rnn_belief_seq_dist_v12 import SACRNNBeliefSeqDistV12, SACRNNBeliefSeqDistV12_Config
 
 # These will be populated as we migrate more algorithms
 # from .sac import *
@@ -18,4 +19,6 @@ __all__ = [
     "SACRNNBeliefSeqDistV9_Config",
     "SACRNNBeliefSeqDistV10",
     "SACRNNBeliefSeqDistV10_Config",
+    "SACRNNBeliefSeqDistV12",
+    "SACRNNBeliefSeqDistV12_Config",
 ]
