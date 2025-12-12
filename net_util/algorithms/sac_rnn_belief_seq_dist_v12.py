@@ -81,7 +81,7 @@ class SACRNNBeliefSeqDistV12_Config:
     log_interval: int = 50
     cdl_num_random: int = 10
     cdl_beta_cql_multiplier: float = 5 * 20
-    annealing_max_lb: float = 2e-3
+    annealing_max_lb: float = 0.05
     annealing_epoch_max: float = 10
     sigma_k = 0.1
     
@@ -368,7 +368,7 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
         q_TBC = z_TBCN.mean(dim=-1)                            # [T,B,C]
         qmin_pi = q_TBC.mean(dim=-1, keepdim=True)             # [T,B,1]
 
-        scale_value = self.update_actor_loss_scale(returns_train.detach()).item()
+        scale_value = self.update_actor_loss_scale(returns_train.detach()).item() / 3.3
         denom = max(scale_value, 1.0)
 
         # two parts of the loss

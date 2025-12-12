@@ -66,7 +66,7 @@ class Network(nn.Module):
         log_std_min: float = -20.0,
         log_std_max: float = 2.0,
         n_critics: int = 2,
-        dropped_per_critic: int = 3,
+        dropped_per_critic: int = 2,
     ):
         super().__init__()
         self.log_std_min, self.log_std_max = float(log_std_min), float(log_std_max)

@@ -106,7 +106,7 @@ class RNNPriReplayFiFo:
                  beta0: float = 0.4,     # kept for API compatibility, unused
                  rebalance_interval: int = 100,   # unused
                  writer=None,
-                 episode_length: int = 600):
+                 episode_length: int = 100):
         self.device = th.device(device)
         self.capacity = int(capacity)
         self.gamma = float(gamma)
