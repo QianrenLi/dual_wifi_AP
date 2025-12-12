@@ -12,7 +12,7 @@ def outage_extract(current_stats: dict) -> list:
 
 @register_baseline
 class HardDeadLine:
-    def __init__(self, state_cfg, initial_cmd):
+    def __init__(self, state_cfg, initial_cmd, **kwargs):
         self.step_init = 0.05
         self.step_size = 0.05
         self.state_cfg = state_cfg

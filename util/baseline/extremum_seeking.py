@@ -1,4 +1,5 @@
 from . import register_baseline
+from ..trace_collec import trace_filter, flatten_leaves
 import numpy as np
 
 @register_baseline
@@ -8,10 +9,7 @@ class ExtremumSeeking:
         self.initial_cmd = self.u.copy()
         self.state_cfg = state_cfg
 
-        self.alpha = 4.0
-        if reward_cfg and 'outage_rate' in reward_cfg:
-            if 'args' in reward_cfg['outage_rate'] and 'zeta' in reward_cfg['outage_rate']['args']:
-                self.alpha = abs(reward_cfg['outage_rate']['args']['zeta'])
+        self.reward_cfg = reward_cfg if reward_cfg else {}
 
         self.step_size = 0.1
         self.min_step_size = 0.01
@@ -32,17 +30,9 @@ class ExtremumSeeking:
     def act(self, current_stats, **kwargs):
         self.iteration += 1
 
-        throughput = 0.0
-        if 'stats' in current_stats and 'flow_stat' in current_stats['stats']:
-            for _, flow_data in current_stats['stats']['flow_stat'].items():
-                if 'throughput' in flow_data:
-                    throughput += flow_data['throughput']
-        T = throughput * 1e-6
+        reward = flatten_leaves(trace_filter(current_stats, self.reward_cfg))
 
-        outage_rates = self._extract_outage_rates(current_stats)
-        O = np.mean(outage_rates) if outage_rates else 0.0
-
-        J = T - self.alpha * O
+        J = np.mean(reward)
 
         if self.J_prev != -float('inf'):
             improved = J > self.J_prev
