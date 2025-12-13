@@ -108,6 +108,7 @@ def plot_interface_percentages_boxplot(
     y_range: Optional[Tuple[float, float]] = (0.0, 100.0),
     annotate_n: bool = True,
     bw_method: Optional[float] = None,
+    figsize = "medium",
 ):
     if isinstance(logs, dict):
         data = []
@@ -129,7 +130,8 @@ def plot_interface_percentages_boxplot(
 
     positions = np.arange(1, len(data) + 1, dtype=float)
 
-    fig, ax = plt.subplots()
+    # fig, ax = plt.subplots()
+    fig, ax = create_figure(size=figsize)
 
     vp = ax.violinplot(
         dataset=data,
@@ -142,19 +144,16 @@ def plot_interface_percentages_boxplot(
     )
 
     for b in vp["bodies"]:
+        b.set_edgecolor('black')
+        b.set_linewidth(1.2)
+        b.set_facecolor(PlotTheme.get_color(1))  # optional fill color
         b.set_alpha(0.6)
 
     for i, arr in enumerate(data, start=1):
         if arr.size == 0 or not np.isfinite(arr).any():
             continue
         q1, q2, q3 = np.percentile(arr, [25, 50, 75])
-        iqr = q3 - q1
-        lo = np.min(arr[arr >= q1 - 1.5 * iqr]) if arr.size else q1
-        hi = np.max(arr[arr <= q3 + 1.5 * iqr]) if arr.size else q3
-        ax.vlines(i, q1, q3, lw=3, zorder=4)
-        ax.scatter([i], [q2], s=22, zorder=5)
-        ax.vlines(i, lo, hi, lw=1.2, zorder=4)
-        ax.hlines([lo, hi], i - 0.08, i + 0.08, lw=1.2, zorder=4)
+        ax.hlines(q2, i - 0.15, i + 0.15, lw=1.0, zorder=5, color="black")
 
     if show_points:
         rng = np.random.default_rng(0)
@@ -185,11 +184,6 @@ def plot_interface_percentages_boxplot(
     # Adjust tick sizes
     ax.tick_params(axis="x", labelsize=PlotTheme.FONT_SIZE_MEDIUM)
     ax.tick_params(axis="y", labelsize=PlotTheme.FONT_SIZE_MEDIUM)
-
-    if annotate_n:
-        for i, arr in enumerate(data, start=1):
-            n = np.sum(np.isfinite(arr))
-            ax.text(i, ax.get_ylim()[0], f"n={n}", ha="center", va="bottom", fontsize=9)
 
     plt.tight_layout()
 
@@ -429,11 +423,12 @@ def main():
         plot_interface_percentages_boxplot(
             il_to_logs,
             il_ids,
-            title="Channel Utilization per rollout",
-            ylabel="Factor",
+            # title="Channel Utilization per rollout",
+            ylabel="Channel Utilization (%)",
             save_path=str(out_dir / "percentage.pdf"),
             show_points=False,
             y_range=None,
+            figsize="portrait_small",
         )
     except Exception as e:
         print(f"[error] Failed to plot interface percentages: {e}")
