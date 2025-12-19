@@ -3,6 +3,8 @@ import argparse, json, os, time
 from dataclasses import MISSING, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, get_args, get_origin
+from datetime import datetime
+import traceback
 
 import torch as th
 from torch.utils.tensorboard import SummaryWriter
@@ -10,8 +12,6 @@ from torch.utils.tensorboard import SummaryWriter
 from net_util import POLICY_REGISTRY, POLICY_CFG_REGISTRY, BUFFER_REGISTRY
 from net_util.base import PolicyBase
 # Ensure all algorithms are imported
-import net_util.algorithms.sac_rnn_belief_seq_dist_v11
-import net_util.algorithms.sac_rnn_belief_seq_dist_v12
 from util.control_cmd import ControlCmd
 from util.trace_watcher import TraceWatcher
 
@@ -71,137 +71,154 @@ def _normalize_trace_paths(arg) -> List[str]:
 
 # ----------------------------- Main -----------------------------
 def main():
-    ap = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
-    ap.add_argument("--control_config", required=True)
-    ap.add_argument(
-        "--trace_path",
-        required=True,
-        nargs="+",
-        help="One or more root folders to watch; all **/*.jsonl under each will be included",
-    )
-    ap.add_argument("--load_path", default=None)
-    ap.add_argument("--delta-min", type=float, default=5e-4)
-    ap.add_argument("--delta-max", type=float, default=5)
-    ap.add_argument("--batch-rl", action = 'store_true')
-    ap.add_argument("--reuse-traces", action='store_true',
-                    help="After all traces are loaded once, re-use existing traces for offline testing")
-    args = ap.parse_args()
+    try:
+        ap = argparse.ArgumentParser(description="Control + stochastic collect agent (ControlCmd-aware)")
+        ap.add_argument("--control_config", required=True)
+        ap.add_argument(
+            "--trace_path",
+            required=True,
+            nargs="+",
+            help="One or more root folders to watch; all **/*.jsonl under each will be included",
+        )
+        ap.add_argument("--load_path", default=None)
+        ap.add_argument("--delta-min", type=float, default=5e-4)
+        ap.add_argument("--delta-max", type=float, default=5)
+        ap.add_argument("--batch-rl", action = 'store_true')
+        ap.add_argument("--reuse-traces", action='store_true',
+                        help="After all traces are loaded once, re-use existing traces for offline testing")
+        args = ap.parse_args()
 
-    cfg_stem = Path(args.control_config).parent.stem
-    with open(args.control_config, "r", encoding="utf-8") as f:
-        control_cfg = json.load(f)
+        cfg_stem = Path(args.control_config).parent.stem
+        with open(args.control_config, "r", encoding="utf-8") as f:
+            control_cfg = json.load(f)
 
-    # Registries
-    pol_manifest = control_cfg["policy_cfg"]
-    pol_name = pol_manifest["policy_name"]
-    PolicyCfg = POLICY_CFG_REGISTRY[pol_name]
-    PolicyCls = POLICY_REGISTRY[pol_name]
-    roll_cfg = control_cfg["rollout_cfg"]
-    BufferCls = BUFFER_REGISTRY[roll_cfg["buffer_name"]]
+        # Registries
+        pol_manifest = control_cfg["policy_cfg"]
+        pol_name = pol_manifest["policy_name"]
+        PolicyCfg = POLICY_CFG_REGISTRY[pol_name]
+        PolicyCls = POLICY_REGISTRY[pol_name]
+        roll_cfg = control_cfg["rollout_cfg"]
+        BufferCls = BUFFER_REGISTRY[roll_cfg["buffer_name"]]
 
-    # Trace watcher (multi-root, recursive *.jsonl)
-    roots = _normalize_trace_paths(args.trace_path)
-    watcher = TraceWatcher(roots, control_cfg, max_step=3)
-    init_traces, interference_vals = watcher.load_initial_traces()
-    while init_traces == []:
+        # Trace watcher (multi-root, recursive *.jsonl)
+        roots = _normalize_trace_paths(args.trace_path)
+        watcher = TraceWatcher(roots, control_cfg, max_step=3)
         init_traces, interference_vals = watcher.load_initial_traces()
-        time.sleep(1)
-    
-    # Build buffer
-    writer = SummaryWriter(f"net_util/logs/{cfg_stem}")
-    buf = BufferCls.build_from_traces(
-        init_traces,
-        device="cuda",
-        advantage_estimator=roll_cfg.get("advantage_estimator"),
-        gamma=pol_manifest.get("gamma"),
-        lam=roll_cfg.get("lam"),
-        reward_agg=roll_cfg.get("reward_agg", "sum"),
-        buffer_max=roll_cfg.get("buffer_max", 10_000_000),
-        interference_vals = interference_vals,
-        writer = writer,
-        capacity = 10000 if args.batch_rl else 6000,
-    )
+        while init_traces == []:
+            init_traces, interference_vals = watcher.load_initial_traces()
+            time.sleep(1)
 
-    # Policy
-    pol_cfg = _inflate_dataclass_from_manifest(PolicyCfg, pol_manifest)
-    if args.batch_rl:
-        pol_cfg.batch_rl = True
-        
-    policy: PolicyBase = PolicyCls(ControlCmd, pol_cfg, rollout_buffer=buf, device="cuda", reward_cfg = control_cfg.get("reward_cfg"))
+        # Build buffer
+        writer = SummaryWriter(f"net_util/logs/{cfg_stem}")
+        buf = BufferCls.build_from_traces(
+            init_traces,
+            device="cuda",
+            advantage_estimator=roll_cfg.get("advantage_estimator"),
+            gamma=pol_manifest.get("gamma"),
+            lam=roll_cfg.get("lam"),
+            reward_agg=roll_cfg.get("reward_agg", "sum"),
+            buffer_max=roll_cfg.get("buffer_max", 10_000_000),
+            interference_vals = interference_vals,
+            writer = writer,
+            capacity = 10000 if args.batch_rl else 6000,
+        )
 
-    # Checkpoint pathing
-    if not args.load_path or str(args.load_path).lower() == "none":
-        ckpt_dir = Path("net_util/net_cp") / cfg_stem
-        next_id = 1
-    else:
-        print("Load model")
-        policy.load(args.load_path, device="cuda")
-        ckpt_dir = Path(args.load_path).parent
-        next_id = int(Path(args.load_path).stem) + 1
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    store_path = ckpt_dir / f"{next_id}.pt"
-    latest_path = ckpt_dir / f"latest.pt"
-    # policy.load(latest_path, device="cuda")
+        # Policy
+        pol_cfg = _inflate_dataclass_from_manifest(PolicyCfg, pol_manifest)
+        if args.batch_rl:
+            pol_cfg.batch_rl = True
 
-    # TB + training
-    actor_before = _flatten_params(policy.net.actor_parameters())
+        policy: PolicyBase = PolicyCls(ControlCmd, pol_cfg, rollout_buffer=buf, device="cuda", reward_cfg = control_cfg.get("reward_cfg"))
 
-    def _extend_with_new():
-        new_traces, interference_vals = watcher.poll_new_traces()
+        # Checkpoint pathing
+        if not args.load_path or str(args.load_path).lower() == "none":
+            ckpt_dir = Path("net_util/net_cp") / cfg_stem
+            next_id = 1
+        else:
+            print("Load model")
+            policy.load(args.load_path, device="cuda")
+            ckpt_dir = Path(args.load_path).parent
+            next_id = int(Path(args.load_path).stem) + 1
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        store_path = ckpt_dir / f"{next_id}.pt"
+        latest_path = ckpt_dir / f"latest.pt"
+        # policy.load(latest_path, device="cuda")
 
-        # If no new traces and reuse is enabled, reload existing traces
-        if not new_traces and args.reuse_traces:
-            # Check if we have seen traces to reuse (after initial loading)
-            if len(watcher._seen) > 0:
-                print("[Trace Reuse] No new traces available, reusing existing traces...")
-                new_traces, interference_vals = watcher.reset_and_reload_all()
-                # Shuffle to vary the order
-                if new_traces:
-                    import random
-                    random.shuffle(new_traces)
-                    random.shuffle(interference_vals)
-                    print(f"[Trace Reuse] Reloaded {len(new_traces)} traces")
+        # TB + training
+        actor_before = _flatten_params(policy.net.actor_parameters())
 
-        if new_traces != []:
-            policy.buf.extend(
-                new_traces,
-                device="cuda",
-                reward_agg=roll_cfg.get("reward_agg", "sum"),
-                advantage_estimator=roll_cfg.get("advantage_estimator"),
-                gamma=pol_manifest.get("gamma"),
-                lam=roll_cfg.get("lam"),
-                interference_vals = interference_vals,
-            )
-            return True
-        return False
+        def _extend_with_new():
+            new_traces, interference_vals = watcher.poll_new_traces()
 
-    epoch = 0
-    store_int = 1000
-    last_trained_time = time.time()
-    while True:        
-        no_need_update = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
-        epoch += 1
-                
-        # Actor drift
-        actor_after = _flatten_params(policy.net.actor_parameters())
-        delta = float((actor_after - actor_before).norm(p=2).item())
-        writer.add_scalar("params/delta_actor_epoch_L2", delta, epoch)
+            # If no new traces and reuse is enabled, reload existing traces
+            if not new_traces and args.reuse_traces:
+                # Check if we have seen traces to reuse (after initial loading)
+                if len(watcher._seen) > 0:
+                    print("[Trace Reuse] No new traces available, reusing existing traces...")
+                    new_traces, interference_vals = watcher.reset_and_reload_all()
+                    # Shuffle to vary the order
+                    if new_traces:
+                        import random
+                        random.shuffle(new_traces)
+                        random.shuffle(interference_vals)
+                        print(f"[Trace Reuse] Reloaded {len(new_traces)} traces")
 
-        # Big jump → save and roll checkpoint id
-        trained_time = time.time()
-        if delta >= args.delta_max or (trained_time - last_trained_time) >= 10:
-            actor_before = actor_after
-            last_trained_time = trained_time
-            policy.save(latest_path)
-            
-        if epoch % store_int == 0: # For checkpointer purpose
-            policy.save(store_path)
-            next_id += 1
-            store_path = ckpt_dir / f"{next_id}.pt"
-            
-        if not no_need_update:
-            res = _extend_with_new()
-            continue
+            if new_traces != []:
+                policy.buf.extend(
+                    new_traces,
+                    device="cuda",
+                    reward_agg=roll_cfg.get("reward_agg", "sum"),
+                    advantage_estimator=roll_cfg.get("advantage_estimator"),
+                    gamma=pol_manifest.get("gamma"),
+                    lam=roll_cfg.get("lam"),
+                    interference_vals = interference_vals,
+                )
+                return True
+            return False
+
+        epoch = 0
+        store_int = 1000
+        last_trained_time = time.time()
+        while True:
+            no_need_update = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
+            epoch += 1
+
+            # Actor drift
+            actor_after = _flatten_params(policy.net.actor_parameters())
+            delta = float((actor_after - actor_before).norm(p=2).item())
+            writer.add_scalar("params/delta_actor_epoch_L2", delta, epoch)
+
+            # Big jump → save and roll checkpoint id
+            trained_time = time.time()
+            if delta >= args.delta_max or (trained_time - last_trained_time) >= 10:
+                actor_before = actor_after
+                last_trained_time = trained_time
+                policy.save(latest_path)
+
+            if epoch % store_int == 0: # For checkpointer purpose
+                policy.save(store_path)
+                next_id += 1
+                store_path = ckpt_dir / f"{next_id}.pt"
+
+            if not no_need_update:
+                res = _extend_with_new()
+                continue
+
+    except Exception as e:
+        # Save error to file
+        error_log = {
+            'timestamp': datetime.now().isoformat(),
+            'error_type': type(e).__name__,
+            'error_message': str(e),
+            'traceback': traceback.format_exc()
+        }
+
+        # Save to errors.jsonl file
+        with open('errors.jsonl', 'a') as f:
+            f.write(json.dumps(error_log) + '\n')
+
+        print(f"Error saved to errors.jsonl: {error_log['error_type']}: {error_log['error_message']}")
+        raise
 
 
 if __name__ == "__main__":

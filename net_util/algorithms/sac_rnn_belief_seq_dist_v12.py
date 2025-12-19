@@ -119,7 +119,7 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
                 f"Error: {e}. Please check the module path and ensure the Network class exists."
             ) from e
 
-        self.net: Network = net_class(cfg.obs_dim, cfg.act_dim, bins=bins, belief_dim=cfg.belief_dim, n_critics = 5).to(self.device)  # type: ignore
+        self.net: Network = net_class(cfg.obs_dim, cfg.act_dim, bins=bins, belief_dim=cfg.belief_dim, n_critics = 5, belief_labels_dim = 6).to(self.device)  # type: ignore
 
         self.buf = rollout_buffer
 
