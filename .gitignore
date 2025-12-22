@@ -10,6 +10,7 @@ plots/*.pdf
 plots/*/*.pdf
 plots/*/*.png
 plots/*/*.csv
+plots/**
 
 __pycache__/
 logs/
