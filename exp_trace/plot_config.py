@@ -34,6 +34,8 @@ class PlotTheme:
 
     # Figure sizes (width, height) in inches
     FIGURE_SIZES = {
+        "tiny": (3, 2),
+        "tiny2": (6, 2),
         "small": (6, 4),
         "medium": (8, 5),
         "large": (10, 6),

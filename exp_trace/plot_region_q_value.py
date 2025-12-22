@@ -14,13 +14,14 @@ from exp_trace.plot_utils import (
 from exp_trace.plot_config import PlotTheme  # for colors / legend font
 
 
-REGION_DIR = Path("net_util/logs/12_10_v3/region_q_min")
-N_REGIONS = 5
+# REGION_DIR = Path("net_util/logs/12_19_ab/region_q_min")
+REGION_DIR = Path("net_util/logs/12_19_v1/region_q_min")
+N_REGIONS = 6
 OUTPUT_FIG = REGION_DIR / "region_qmin_pi_mean.pdf"
 
 # ---- CONFIG ----
 # Maximum training step to show; set to None to disable clipping
-MAX_STEP: Optional[float] = 400000
+MAX_STEP: Optional[float] = 800e3
 # e.g. MAX_STEP = 30000.0
 
 
@@ -86,7 +87,7 @@ def plot_regions(stride: int = 1, smooth_window: int = 1) -> None:
     smooth_window : int
         Moving average window (1 = no smoothing).
     """
-    fig, ax = create_figure(size="medium")
+    fig, ax = create_figure(size="tiny2")
 
     for region_idx in range(N_REGIONS):
         path = REGION_DIR / f"region_{region_idx}.json"
@@ -112,7 +113,7 @@ def plot_regions(stride: int = 1, smooth_window: int = 1) -> None:
 
         color = PlotTheme.get_color(region_idx)
         ax.plot(
-            steps,
+            np.array(steps) // 1000,
             values,
             label=f"Case {region_idx}",
             color=color,
@@ -120,13 +121,14 @@ def plot_regions(stride: int = 1, smooth_window: int = 1) -> None:
 
     apply_scientific_style(
         ax,
-        xlabel="Training step",
+        xlabel="Training step (K)",
         ylabel=r"$q_{\min}^{\pi}$ (mean)",
         # title=r"Region-wise $q_{\min}^{\pi}$",
-        ylim=(-200,None),
+        ylim=(-50,150),
         minor_ticks=True,
+        # x_scientific = True,
     )
-    ax.legend(fontsize=PlotTheme.LEGEND_FONT_SIZE)
+    # ax.legend(fontsize=PlotTheme.LEGEND_FONT_SIZE)
 
     fig.tight_layout()
     save_figure(fig, OUTPUT_FIG)

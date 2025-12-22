@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, Sequence, Callable
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.ticker import AutoMinorLocator
+from matplotlib.ticker import AutoMinorLocator, ScalarFormatter, FuncFormatter
 
 from exp_trace.plot_config import PlotTheme
 
@@ -173,7 +173,11 @@ def apply_scientific_style(ax: plt.Axes,
                           title: Optional[str] = None,
                           xlim: Optional[Tuple[float, float]] = None,
                           ylim: Optional[Tuple[float, float]] = None,
-                          minor_ticks: bool = True) -> None:
+                          minor_ticks: bool = True,
+                          x_scientific: Optional[bool] = None,
+                          y_scientific: Optional[bool] = None,
+                          scientific_powerlimits: Tuple[int, int] = (-2, 2),
+                          exponent_placement: str = "edge") -> None:
     """
     Apply scientific styling to an axis.
 
@@ -193,6 +197,17 @@ def apply_scientific_style(ax: plt.Axes,
         Y-axis limits
     minor_ticks : bool, optional
         Whether to show minor ticks (default: True)
+    x_scientific : bool, optional
+        Whether to use scientific notation for x-axis (default: None=auto)
+    y_scientific : bool, optional
+        Whether to use scientific notation for y-axis (default: None=auto)
+    scientific_powerlimits : tuple, optional
+        Power limits for scientific notation (default: (-2, 2))
+        Values outside this range will trigger scientific notation
+    exponent_placement : str, optional
+        Where to place the shared exponent ('edge' or 'inline')
+        'edge': placed at the right/top of axis (default)
+        'inline': placed after each tick label
     """
     # Set labels and title
     if xlabel:
@@ -213,6 +228,10 @@ def apply_scientific_style(ax: plt.Axes,
         ax.xaxis.set_minor_locator(AutoMinorLocator(2))
         ax.yaxis.set_minor_locator(AutoMinorLocator(2))
 
+    # Apply scientific notation if requested
+    _apply_scientific_notation(ax, x_scientific, y_scientific,
+                              scientific_powerlimits, exponent_placement)
+
     # Apply grid
     PlotTheme.apply_grid_style(ax, major=True)
     PlotTheme.apply_grid_style(ax, major=False)
@@ -220,9 +239,65 @@ def apply_scientific_style(ax: plt.Axes,
     # Hide spines for scientific look
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    
+
     # tick font
     ax.tick_params(axis='both', which='major', labelsize=PlotTheme.FONT_SIZE_MEDIUM)
+
+
+def _apply_scientific_notation(ax: plt.Axes,
+                             x_scientific: Optional[bool],
+                             y_scientific: Optional[bool],
+                             powerlimits: Tuple[int, int],
+                             exponent_placement: str) -> None:
+    """
+    Apply scientific notation formatting to axis tick labels.
+
+    Parameters
+    ----------
+    ax : plt.Axes
+        Axis to style
+    x_scientific : bool or None
+        Whether to use scientific notation for x-axis
+    y_scientific : bool or None
+        Whether to use scientific notation for y-axis
+    powerlimits : tuple
+        Power limits for triggering scientific notation
+    exponent_placement : str
+        Where to place the exponent ('edge' or 'inline')
+    """
+    # Configure x-axis
+    if x_scientific is not None or y_scientific is not None:
+        # Apply to x-axis if specified
+        if x_scientific is not None:
+            if x_scientific:
+                formatter = ScalarFormatter(useOffset=True, useMathText=True)
+                formatter.set_scientific(True)
+                formatter.set_powerlimits(powerlimits)
+                ax.xaxis.set_major_formatter(formatter)
+
+                # Style the offset text if using edge placement
+                if exponent_placement == "edge":
+                    ax.xaxis.offsetText.set_size(PlotTheme.FONT_SIZE_MEDIUM)
+                    ax.xaxis.offsetText.set_color('black')
+            else:
+                # Force non-scientific notation
+                ax.xaxis.set_major_formatter(plt.FormatStrFormatter('%g'))
+
+        # Apply to y-axis if specified
+        if y_scientific is not None:
+            if y_scientific:
+                formatter = ScalarFormatter(useOffset=True, useMathText=True)
+                formatter.set_scientific(True)
+                formatter.set_powerlimits(powerlimits)
+                ax.yaxis.set_major_formatter(formatter)
+
+                # Style the offset text if using edge placement
+                if exponent_placement == "edge":
+                    ax.yaxis.offsetText.set_size(PlotTheme.FONT_SIZE_MEDIUM)
+                    ax.yaxis.offsetText.set_color('black')
+            else:
+                # Force non-scientific notation
+                ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%g'))
 
 
 def flatten_dict_of_lists(d: Dict[str, List[float]]) -> np.ndarray:
