@@ -358,6 +358,95 @@ def aggregate_values(arr: np.ndarray,
         return float(np.nanmean(arr))
 
 
+def calculate_confidence_interval(data: np.ndarray,
+                                confidence: float = 0.95,
+                                method: str = "t") -> Tuple[float, float]:
+    """
+    Calculate confidence interval for data.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Input data array
+    confidence : float, optional
+        Confidence level (default: 0.95)
+    method : str, optional
+        Method for calculation ("t" for t-distribution, "normal" for normal)
+        (default: "t")
+
+    Returns
+    -------
+    tuple
+        (lower_bound, upper_bound) of confidence interval
+    """
+    if data.size < 2:
+        return 0.0, 0.0
+
+    # Remove NaN values
+    clean_data = data[~np.isnan(data)]
+    if clean_data.size < 2:
+        return 0.0, 0.0
+
+    n = clean_data.size
+    mean = np.mean(clean_data)
+    std = np.std(clean_data, ddof=1)
+
+    if method == "t" and n >= 2:
+        # Use t-distribution for small samples
+        from scipy import stats
+        alpha = 1.0 - confidence
+        t_critical = stats.t.ppf(1.0 - alpha/2.0, n - 1)
+        margin_error = t_critical * (std / np.sqrt(n))
+    else:
+        # Use normal distribution (z-score)
+        # Common z-scores: 90%=1.645, 95%=1.96, 99%=2.576
+        z_scores = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}
+        z_critical = z_scores.get(confidence, 1.96)
+        margin_error = z_critical * (std / np.sqrt(n))
+
+    return mean - margin_error, mean + margin_error
+
+
+def calculate_error_bars(data_list: List[np.ndarray],
+                        confidence: float = 0.95,
+                        method: str = "t") -> np.ndarray:
+    """
+    Calculate error bars for multiple data arrays.
+
+    Parameters
+    ----------
+    data_list : list of np.ndarray
+        List of data arrays
+    confidence : float, optional
+        Confidence level (default: 0.95)
+    method : str, optional
+        Method for calculation ("t" or "normal") (default: "t")
+
+    Returns
+    -------
+    np.ndarray
+        Array of error bar values (half-width of confidence intervals)
+    """
+    errors = []
+    for data in data_list:
+        if data.size < 2:
+            errors.append(0.0)
+            continue
+
+        # Remove NaN values
+        clean_data = data[~np.isnan(data)]
+        if clean_data.size < 2:
+            errors.append(0.0)
+            continue
+
+        lower, upper = calculate_confidence_interval(clean_data, confidence, method)
+        mean = np.mean(clean_data)
+        error = upper - mean  # Half-width of confidence interval
+        errors.append(error)
+
+    return np.array(errors)
+
+
 def moving_average(data: List[float],
                   window: int,
                   mode: str = "same") -> List[float]:
@@ -492,14 +581,14 @@ def create_box_plot_with_stats(ax: plt.Axes,
     # Style the whiskers and caps
     for whisker in bp['whiskers']:
         whisker.set_linestyle('-')
-        whisker.set_linewidth(1.5)
+        whisker.set_linewidth(1.6)
 
     for cap in bp['caps']:
-        cap.set_linewidth(1.5)
+        cap.set_linewidth(1.6)
 
     # Style the median lines
     for median in bp['medians']:
-        median.set_linewidth(2)
+        median.set_linewidth(1.6)
         median.set_color('black')
 
     return bp

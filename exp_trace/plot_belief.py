@@ -86,29 +86,44 @@ def main():
                     help="Pick latest by lexicographic name instead of modification time")
     ap.add_argument("--showfliers", action="store_true",
                     help="Show outliers in the box plot")
+    ap.add_argument("--last", nargs="+", type=int, default=[0],
+                    help="Indices of last runs per IL (e.g., 0 1 for last and second last).")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
     data_reader = ExpTraceReader(args.meta_folder)
 
     il_to_beliefs = {}
+    seen_keys = set()
 
-    for il_id, run_folder in data_reader.latest_folders.items():
-        rollout = data_reader.get_data(run_folder)[0]
-        if rollout is None:
-            print(f"[warn] no rollout.jsonl in {run_folder}")
-            continue
-        beliefs = rollout.belief
-        if not beliefs:
-            print(f"[warn] parsed 0 belief entries from {rollout}")
-            continue
-        il_to_beliefs.setdefault(il_id, []).extend(beliefs)
+    for k in args.last:
+        per_il = data_reader.pick_last_k_per_il(k)
+        for il_id, run_folder in sorted(per_il.items()):
+            key = (il_id, str(run_folder))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            print(f"k={k}, il={il_id}, folder={run_folder}")
+
+            rollout = data_reader.get_data(run_folder)[0]
+            if rollout is None:
+                print(f"[warn] no rollout.jsonl in {run_folder}")
+                continue
+            beliefs = rollout.belief
+            if not beliefs:
+                print(f"[warn] parsed 0 belief entries from {rollout}")
+                continue
+            il_to_beliefs.setdefault(il_id, []).extend(beliefs)
 
     # Plot one box figure: x = IL index
     if il_to_beliefs:
         out_path = out_dir / args.filename
-        title = "Belief distribution — latest run per IL"
-        plot_belief_box_per_il(il_to_beliefs, title=title, out_path=out_path, showfliers=args.showfliers)
+        if args.last == [0]:
+            title = "Belief distribution — latest run per IL"
+        else:
+            title = f"Belief distribution — runs {args.last} per IL"
+        plot_belief_box_per_il(il_to_beliefs, title=None, out_path=out_path, showfliers=args.showfliers, figsize="small")
     else:
         print("[info] No beliefs found; nothing to plot.")
 
