@@ -42,7 +42,7 @@ class PlotTheme:
         "wide": (12, 6),
         "square": (8, 8),
         "portrait": (7, 10),
-        "portrait_small": (3.5, 5),
+        "portrait_small": (3, 4),
     }
 
     # DPI settings

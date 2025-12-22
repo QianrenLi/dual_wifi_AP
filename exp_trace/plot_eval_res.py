@@ -185,7 +185,7 @@ def plot_interface_percentages_boxplot(
     ax.tick_params(axis="x", labelsize=PlotTheme.FONT_SIZE_MEDIUM)
     ax.tick_params(axis="y", labelsize=PlotTheme.FONT_SIZE_MEDIUM)
 
-    plt.tight_layout()
+    # plt.tight_layout()
 
     if save_path:
         save_figure(fig, save_path, dpi=PlotTheme.DPI_PUBLICATION)
@@ -202,7 +202,7 @@ def plot_bar_simple(
     annotate: bool = True,
     rotation: int = 0,
     save_path: Optional[str] = None,
-    y_limits_low: Optional[float] = None,
+    ylimits: Tuple[Optional[float]] = (None, None),
     errors: Optional[Sequence[float]] = None,
     figsize: str = "medium",
 ):
@@ -259,7 +259,7 @@ def plot_bar_simple(
         ax,
         ylabel=ylabel,
         title=title,
-        ylim=(y_limits_low, None) if y_limits_low is not None else None,
+        ylim=ylimits if ylimits is not None else None,
         minor_ticks=False
     )
 
@@ -269,7 +269,7 @@ def plot_bar_simple(
 
     if annotate and len(values) > 0:
         vmax = np.nanmax(values)
-        diff = vmax - 0 if y_limits_low is None else vmax - y_limits_low
+        diff = vmax - 0 if ylimits[0] is None else vmax - ylimits[0]
         offset = 0.01 * (diff if np.isfinite(diff) else 1.0)
         for rect, v in zip(bars, values):
             label = "NaN" if not np.isfinite(v) else f"{v:.2f}"
@@ -400,6 +400,7 @@ def main():
         ylabel="Throughput (Mb/s)",
         save_path=str(out_dir / "tput.pdf"),
         figsize="portrait_small",
+        ylimits=(5, 27),
     )
     plot_bar_simple(
         out_mean * 100,
@@ -407,8 +408,8 @@ def main():
         title=None,
         ylabel="Outage (%)",
         save_path=str(out_dir / "outage.pdf"),
-        y_limits_low=None,
         figsize="portrait_small",
+        ylimits=(0, 22),
     )
     plot_bar_simple(
         rew_mean,
@@ -417,6 +418,7 @@ def main():
         ylabel="Reward",
         save_path=str(out_dir / "reward.pdf"),
         figsize="portrait_small",
+        ylimits=(None, 1.6),
     )
 
     try:
@@ -427,7 +429,7 @@ def main():
             ylabel="Channel Utilization (%)",
             save_path=str(out_dir / "percentage.pdf"),
             show_points=False,
-            y_range=None,
+            y_range=(50, 100),
             figsize="portrait_small",
         )
     except Exception as e:
