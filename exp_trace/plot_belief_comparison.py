@@ -53,8 +53,11 @@ def plot_belief_comparison(meta_folder_data: List[Tuple[str, Dict[int, List[floa
         data = []
         positions = []
         il_colors = []  # Store color for each IL
-
-        for i, il_id in enumerate(all_ils):
+        
+        current_ils = il_to_beliefs.keys()
+        current_ils = sorted(current_ils)
+        
+        for i, il_id in enumerate(current_ils):
             beliefs = il_to_beliefs.get(il_id, [0.0])
             data.append(beliefs)
 
@@ -79,16 +82,16 @@ def plot_belief_comparison(meta_folder_data: List[Tuple[str, Dict[int, List[floa
                        showfliers=showfliers,
                     #    boxprops=dict(facecolor='gray', alpha=0.6,  # Will be overridden per box
                                 #    edgecolor='black', linestyle=edge_style, linewidth=1.2),
-                       medianprops=dict(color='black', linewidth=1.2, linestyle=edge_style),
-                       whiskerprops=dict(color='black', linewidth=1.2, linestyle=edge_style),
-                       capprops=dict(color='black', linewidth=1.2, linestyle=edge_style))
+                       medianprops=dict(color='black', linewidth=1.6, linestyle=edge_style),
+                       whiskerprops=dict(color='black', linewidth=1.6, linestyle=edge_style),
+                       capprops=dict(color='black', linewidth=1.6, linestyle=edge_style))
 
         # Color each box individually based on IL index
         for patch, color in zip(bp['boxes'], il_colors):
-            patch.set_facecolor(color)
+            patch.set_facecolor(PlotTheme.get_color(meta_idx))
             patch.set_alpha(0.6)
             patch.set_edgecolor('black')  # Set edge color explicitly to black
-            patch.set_linewidth(1.2)      # Set line width
+            patch.set_linewidth(1.6)      # Set line width
             patch.set_linestyle(edge_style)  # Set line style (dashed or solid)
 
     # Set x-axis labels at the exact IL positions (first meta-folder positions)
@@ -103,7 +106,7 @@ def plot_belief_comparison(meta_folder_data: List[Tuple[str, Dict[int, List[floa
             Patch(facecolor='white', alpha=0.6,
                  edgecolor='black',
                  linestyle='-' if line_style == "solid" else '--',
-                 label=meta_name)
+                 label='In Domain' if i == 0 else 'Out Domain')
         )
     ax.legend(handles=legend_elements, loc='best')
 
@@ -125,7 +128,7 @@ def plot_belief_comparison(meta_folder_data: List[Tuple[str, Dict[int, List[floa
         min_il = min(all_ils)
         max_il = max(all_ils)
         # Add margin: 0.5 on left, 1.0 on right (to accommodate +0.5 shift)
-        ax.set_xlim(min_il - 0.5, max_il + 1.0)
+        ax.set_xlim(min_il - 0.5, max_il + 0.5)
 
     # Save figure
     save_figure(fig, out_path, dpi=PlotTheme.DPI_PUBLICATION)
@@ -230,7 +233,7 @@ def main():
         out_path = out_dir / args.filename
         title = f"Belief Distribution Comparison: {args.name_1} vs {args.name_2}"
         plot_belief_comparison(meta_folder_data, title=title, out_path=out_path,
-                             showfliers=args.showfliers, figsize="large")
+                             showfliers=args.showfliers, figsize="small")
     else:
         print("[error] Could not create comparison plot - need belief data from both meta-folders")
 
