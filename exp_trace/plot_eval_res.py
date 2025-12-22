@@ -143,10 +143,10 @@ def plot_interface_percentages_boxplot(
         bw_method=bw_method,
     )
 
-    for b in vp["bodies"]:
+    for b_i, b in enumerate(vp["bodies"]):
         b.set_edgecolor('black')
         b.set_linewidth(1.2)
-        b.set_facecolor(PlotTheme.get_color(1))  # optional fill color
+        b.set_facecolor(PlotTheme.get_color(b_i))  # optional fill color
         b.set_alpha(0.6)
 
     for i, arr in enumerate(data, start=1):
@@ -247,11 +247,11 @@ def plot_bar_simple(
         values,
         width=width,
         edgecolor="black",
-        alpha=0.8,
-        linewidth=0.6,
+        alpha=0.6,
+        linewidth=1.2,
         yerr=errors,
         capsize=4,
-        color=PlotTheme.get_color(2)
+        color=[PlotTheme.get_color(i) for i in range(len(values))]
     )
 
     # Apply scientific styling
@@ -399,7 +399,7 @@ def main():
         title=None,
         ylabel="Throughput (Mb/s)",
         save_path=str(out_dir / "tput.pdf"),
-        figsize="portrait_small",
+        figsize="tiny",
         ylimits=(5, 27),
     )
     plot_bar_simple(
@@ -408,7 +408,7 @@ def main():
         title=None,
         ylabel="Outage (%)",
         save_path=str(out_dir / "outage.pdf"),
-        figsize="portrait_small",
+        figsize="tiny",
         ylimits=(0, 22),
     )
     plot_bar_simple(
@@ -417,7 +417,7 @@ def main():
         title=None,
         ylabel="Reward",
         save_path=str(out_dir / "reward.pdf"),
-        figsize="portrait_small",
+        figsize="tiny",
         ylimits=(None, 1.6),
     )
 
@@ -429,8 +429,8 @@ def main():
             ylabel="Channel Utilization (%)",
             save_path=str(out_dir / "percentage.pdf"),
             show_points=False,
-            y_range=(50, 100),
-            figsize="portrait_small",
+            y_range=(80, 100),
+            figsize="tiny",
         )
     except Exception as e:
         print(f"[error] Failed to plot interface percentages: {e}")
