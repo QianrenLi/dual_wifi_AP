@@ -79,10 +79,9 @@ def main():
             "--trace_path",
             required=True,
             nargs="+",
-            action="append",
-            help="One or more root folders to watch; all **/*.jsonl under each will be included. "
-                 "Can be specified multiple times for multiple data sources with fallback. "
-                 "Example: --trace_path dir1 dir2 --trace_path dir3 (dir1,dir2 are primary; dir3 is fallback)",
+            help="Root folders to watch with fallback. First path is primary source, "
+                 "remaining paths are fallback sources when primary is empty. "
+                 "Example: --trace_path primary_dir fallback_dir1 fallback_dir2",
         )
         ap.add_argument("--load_path", default=None)
         ap.add_argument("--delta-min", type=float, default=5e-4)
@@ -105,13 +104,13 @@ def main():
         BufferCls = BUFFER_REGISTRY[roll_cfg["buffer_name"]]
 
         # Trace watcher (multi-root, recursive *.jsonl)
-        # Support multiple data sources with fallback
-        # args.trace_path is now a list of lists: [[dir1, dir2], [dir3]]
-        # Each inner list is a separate data source group
-        trace_source_groups = [_normalize_trace_paths(group) for group in args.trace_path]
+        # Support multiple data sources with fallback.
+        # First path is primary, remaining paths are fallbacks.
+        # Each path gets its own TraceWatcher.
+        trace_paths = _normalize_trace_paths(args.trace_path)
         watchers: List[TraceWatcher] = []
-        for roots in trace_source_groups:
-            watcher = TraceWatcher(roots, control_cfg, max_step=3)
+        for path in trace_paths:
+            watcher = TraceWatcher([path], control_cfg, max_step=3)
             watchers.append(watcher)
 
         # Try to load initial traces from primary source first, then fallback sources
@@ -119,14 +118,12 @@ def main():
         for watcher in watchers:
             init_traces, interference_vals = watcher.load_initial_traces()
             if init_traces:
-                print(f"[Data Source] Loaded {len(init_traces)} traces from source")
                 break
         # If still empty, wait and retry
         while init_traces == []:
             for watcher in watchers:
                 init_traces, interference_vals = watcher.load_initial_traces()
                 if init_traces:
-                    print(f"[Data Source] Loaded {len(init_traces)} traces from source after waiting")
                     break
             if not init_traces:
                 time.sleep(1)
@@ -177,7 +174,6 @@ def main():
             for i, watcher in enumerate(watchers):
                 new_traces, interference_vals = watcher.poll_new_traces()
                 if new_traces:
-                    print(f"[Data Source] Collected {len(new_traces)} traces from source {i}")
                     break
 
             # If no new traces and reuse is enabled, try to reload from any watcher
@@ -185,14 +181,12 @@ def main():
                 for i, watcher in enumerate(watchers):
                     # Check if we have seen traces to reuse (after initial loading)
                     if len(watcher._seen) > 0:
-                        print(f"[Trace Reuse] No new traces from source {i}, reusing existing traces...")
                         new_traces, interference_vals = watcher.reset_and_reload_all()
                         # Shuffle to vary the order
                         if new_traces:
                             import random
                             random.shuffle(new_traces)
                             random.shuffle(interference_vals)
-                            print(f"[Trace Reuse] Reloaded {len(new_traces)} traces from source {i}")
                             break
 
             if new_traces != []:
