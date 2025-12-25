@@ -120,7 +120,7 @@ def main():
             buffer_max=roll_cfg.get("buffer_max", 10_000_000),
             interference_vals = interference_vals,
             writer = writer,
-            capacity = 10000 if args.batch_rl else 6000,
+            capacity = 10000 if args.batch_rl else 20000,
         )
 
         # Policy
@@ -177,7 +177,7 @@ def main():
             return False
 
         epoch = 0
-        store_int = 1000
+        store_int = 50000
         last_trained_time = time.time()
         while True:
             no_need_update = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
