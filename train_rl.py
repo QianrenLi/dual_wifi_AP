@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, get_args, get_origin
 from datetime import datetime
 import traceback
+from multiprocessing import Process, Queue
 
 import torch as th
 from torch.utils.tensorboard import SummaryWriter
@@ -68,6 +69,91 @@ def _normalize_trace_paths(arg) -> List[str]:
         parts = [p.strip() for p in str(item).split(",")]
         out.extend(p for p in parts if p)
     return out
+
+
+# ----------------------------- Data Loader Worker -----------------------------
+def _data_loader_worker(watchers, queue, stop_event, roll_cfg, pol_manifest):
+    """
+    Background process that continuously loads and preprocesses traces.
+    Performs ALL CPU-intensive preprocessing:
+    - JSON parsing and trace collection
+    - State transformation
+    - _tracify() conversion to numpy arrays
+    - Episode chunking
+    - Return calculation
+    - Reward/gamma summaries
+
+    Puts pre-processed Episode objects into the queue for fast buffer insertion.
+    """
+    # Import preprocessing functions - these are CPU-intensive
+    from net_util.replay.rnn_fifo import (
+        _tracify,
+        Episode
+    )
+    import numpy as np
+
+    gamma = pol_manifest.get("gamma", 0.99)
+    episode_length = roll_cfg.get("episode_length", 600)
+    reward_agg = roll_cfg.get("reward_agg", "sum")
+    advantage_estimator = roll_cfg.get("advantage_estimator")
+
+    try:
+        while not stop_event.is_set():
+            new_traces, interference_vals = [], []
+
+            # Try to poll from primary watcher first, then fallback watchers
+            for watcher in watchers:
+                new_traces, interference_vals = watcher.poll_new_traces()
+                if new_traces:
+                    break
+
+            # If we have new traces, preprocess them fully
+            if new_traces:
+                preprocessed_episodes = []
+
+                for (states, actions, rewards, network_output), interf in zip(new_traces, interference_vals):
+                    # Step 1: Convert to numpy arrays (was _tracify in buf.extend)
+                    obs_np, act_np, rew_np, next_obs_np, done_np = _tracify(
+                        states, actions, rewards, network_output, reward_agg
+                    )
+
+                    # Step 2: Split into episodes of fixed length
+                    num_episodes = len(obs_np) // episode_length
+                    for i in range(num_episodes):
+                        start = i * episode_length
+                        end = (i + 1) * episode_length
+
+                        # Step 3: Create Episode with all preprocessing done
+                        # This includes: reward_summary, gamma_summary, return calculation
+                        ep = Episode(
+                            obs_np[start:end],
+                            act_np[start:end],
+                            rew_np[start:end],
+                            next_obs_np[start:end],
+                            done_np[start:end],
+                            init_loss=10000.0,
+                            gamma=gamma,
+                            interference=interf
+                        )
+                        preprocessed_episodes.append(ep)
+
+                # Put preprocessed episodes in queue
+                if preprocessed_episodes:
+                    queue.put(preprocessed_episodes)
+            else:
+                # No new data, sleep briefly
+                time.sleep(0.1)
+    except Exception as e:
+        error_log = {
+            'timestamp': datetime.now().isoformat(),
+            'process': 'data_loader_worker',
+            'error_type': type(e).__name__,
+            'error_message': str(e),
+            'traceback': traceback.format_exc()
+        }
+        with open('errors.jsonl', 'a') as f:
+            f.write(json.dumps(error_log) + '\n')
+        print(f"[DataLoader] Error: {e}")
 
 
 # ----------------------------- Main -----------------------------
@@ -205,30 +291,63 @@ def main():
         epoch = 0
         store_int = 50000
         last_trained_time = time.time()
-        while True:
-            no_need_update = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
-            epoch += 1
 
-            # Actor drift
-            actor_after = _flatten_params(policy.net.actor_parameters())
-            delta = float((actor_after - actor_before).norm(p=2).item())
-            writer.add_scalar("params/delta_actor_epoch_L2", delta, epoch)
+        # Setup multiprocessing for data loading
+        data_queue = Queue(maxsize=5)  # Buffer up to 5 batches
+        stop_event = None  # We'll create this conditionally
+        loader_proc = None
 
-            # Big jump → save and roll checkpoint id
-            trained_time = time.time()
-            if delta >= args.delta_max or (trained_time - last_trained_time) >= 10:
-                actor_before = actor_after
-                last_trained_time = trained_time
-                policy.save(latest_path)
+        # Only start background worker if not in batch-rl mode
+        if not args.batch_rl:
+            from multiprocessing import Event
+            stop_event = Event()
+            loader_proc = Process(
+                target=_data_loader_worker,
+                args=(watchers, data_queue, stop_event, roll_cfg, pol_manifest)
+            )
+            loader_proc.start()
+            print(f"[Main] Started background data loader (PID: {loader_proc.pid})")
 
-            if epoch % store_int == 0: # For checkpointer purpose
-                policy.save(store_path)
-                next_id += 1
-                store_path = ckpt_dir / f"{next_id}.pt"
+        try:
+            while True:
+                no_need_update = policy.train_per_epoch(epoch, writer=writer, is_batch_rl=args.batch_rl)
+                epoch += 1
 
-            if not no_need_update:
-                res = _extend_with_new()
-                continue
+                # Big jump → save and roll checkpoint id
+                trained_time = time.time()
+                if trained_time - last_trained_time >= 120:
+                    last_trained_time = trained_time
+                    policy.save(latest_path)
+
+                if epoch % store_int == 0:
+                    policy.save(store_path)
+                    next_id += 1
+                    store_path = ckpt_dir / f"{next_id}.pt"
+
+                # Load new data (non-blocking from queue or synchronous for batch-rl)
+                if not no_need_update:
+                    if not args.batch_rl:
+                        # Try to get preprocessed episodes from queue without blocking
+                        try:
+                            preprocessed_episodes = data_queue.get_nowait()
+                            if preprocessed_episodes:
+                                # Fast insertion - all CPU work already done in background
+                                policy.buf.add_preprocessed_episodes(preprocessed_episodes)
+                                print(f"[Main] Added {len(preprocessed_episodes)} preprocessed episodes to buffer")
+                        except:
+                            # Queue is empty, will try again next epoch
+                            pass
+                    else:
+                        # Batch-RL mode: use original synchronous loading
+                        res = _extend_with_new()
+        finally:
+            # Cleanup background process
+            if not args.batch_rl and stop_event is not None and loader_proc is not None:
+                stop_event.set()
+                loader_proc.join(timeout=5)
+                if loader_proc.is_alive():
+                    loader_proc.terminate()
+                print("[Main] Background data loader stopped")
 
     except Exception as e:
         # Save error to file
