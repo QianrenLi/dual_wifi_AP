@@ -5,6 +5,7 @@ from .sac_rnn_belief_seq_dist_v8 import SACRNNBeliefSeqDistV8, SACRNNBeliefSeqDi
 from .sac_rnn_belief_seq_dist_v9 import SACRNNBeliefSeqDistV9, SACRNNBeliefSeqDistV9_Config
 from .sac_rnn_belief_seq_dist_v10 import SACRNNBeliefSeqDistV10, SACRNNBeliefSeqDistV10_Config
 from .sac_rnn_belief_seq_dist_v12 import SACRNNBeliefSeqDistV12, SACRNNBeliefSeqDistV12_Config
+from .sac_rnn_belief_seq_dist_v13 import SACRNNBeliefSeqDistV13, SACRNNBeliefSeqDistV13_Config
 from .ablation_belief import ABLATIONBELIEF, ABLATIONBELIEF_Config
 
 # These will be populated as we migrate more algorithms
@@ -24,4 +25,6 @@ __all__ = [
     "SACRNNBeliefSeqDistV12_Config",
     "ABLATIONBELIEF",
     "ABLATIONBELIEF_Config",
+    "SACRNNBeliefSeqDistV13",
+    "SACRNNBeliefSeqDistV13_Config",
 ]
