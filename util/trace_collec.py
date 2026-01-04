@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import numpy as np
 from typing import Any, Callable, Dict, Optional, Union, Mapping, Tuple, List, Iterable
 
 from util.filter_rule import FILTER_REGISTRY
+
+logger = logging.getLogger(__name__)
 
 # ----------------------------- Types ----------------------------- #
 Rule = Union[bool, Callable[[Any], Any], str]
@@ -342,8 +345,25 @@ def trace_collec(
     state_descriptor: Optional[Descriptor] = None,
     reward_descriptor: Optional[Descriptor] = None
 ):
+    trace_items = []
     with open(json_file, "r") as f:
-        trace_items = [json.loads(line) for line in f]
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                trace_items.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                logger.error(
+                    f"Failed to parse JSON in {json_file}:{line_num}: {e.msg} "
+                    f"(column {e.colno}, char {e.pos}). Skipping this line. "
+                    f"Context: ...{line[max(0, e.pos-30):min(len(line), e.pos+30)]}..."
+                )
+                continue
+
+    if not trace_items:
+        logger.warning(f"No valid trace items found in {json_file}")
+        return [], [], [], []
 
     actions = [flatten_leaves(t.get("res").get("action")) for t in trace_items]
     states  = [flatten_leaves(trace_filter(t, state_descriptor))  for t in trace_items]
@@ -356,7 +376,7 @@ def trace_collec(
     actions = actions[:-1]
     network_output = network_output[:-1]
     rewards = rewards[1:]
-    
+
     return states, actions, rewards, network_output
 
 # ============================== Demo ============================= #

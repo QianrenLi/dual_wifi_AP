@@ -1,6 +1,7 @@
 # util/trace_watcher.py
 from __future__ import annotations
 
+import logging
 import re
 import random
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Iterable, List, Tuple, Union, Optional, Sequence
 
 from util.trace_collec import trace_collec
 from net_util.state_transfom import _StateTransform
+
+logger = logging.getLogger(__name__)
 
 
 PathLike = Union[str, Path]
@@ -198,18 +201,24 @@ class TraceWatcher:
         interference_vals: List[int] = []
 
         for tp in paths:
-            # Extract interference ID using helper method
-            interference_vals.append(self._extract_interference_id(tp))
-
             s, a, r, net = trace_collec(
                 str(tp),
                 state_descriptor=self.control_config.get("state_cfg", None),
                 reward_descriptor=self.control_config.get("reward_cfg", None),
             )
 
+            # Skip if no valid traces were loaded (e.g., all JSON parsing failed)
+            if len(s) == 0:
+                logger.warning(f"Skipping {tp} - no valid trace items loaded")
+                continue
+
             ## TODO: make this hyperparameter
             if len(s) < 100:
+                logger.debug(f"Skipping {tp} - only {len(s)} steps (minimum 100 required)")
                 continue
+
+            # Extract interference ID using helper method and add to list
+            interference_vals.append(self._extract_interference_id(tp))
 
             # Apply state transformation if available
             if self._state_tf:

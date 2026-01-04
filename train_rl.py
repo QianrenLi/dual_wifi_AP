@@ -17,6 +17,9 @@ from util.control_cmd import ControlCmd
 from util.trace_watcher import TraceWatcher
 from typing import List
 
+#------------------------------ Constants ---------------------------
+EPISOID_LENGTH = 350
+
 
 # ----------------------------- Helpers -----------------------------
 def _coerce_to_type(val: Any, typ) -> Any:
@@ -93,18 +96,20 @@ def _data_loader_worker(watchers, queue, stop_event, roll_cfg, pol_manifest):
     import numpy as np
 
     gamma = pol_manifest.get("gamma", 0.99)
-    episode_length = roll_cfg.get("episode_length", 600)
+    episode_length = roll_cfg.get("episode_length", EPISOID_LENGTH)
     reward_agg = roll_cfg.get("reward_agg", "sum")
     advantage_estimator = roll_cfg.get("advantage_estimator")
 
     try:
         while not stop_event.is_set():
             new_traces, interference_vals = [], []
+            source_idx = -1  # Track which watcher provided the data
 
             # Try to poll from primary watcher first, then fallback watchers
-            for watcher in watchers:
+            for i, watcher in enumerate(watchers):
                 new_traces, interference_vals = watcher.poll_new_traces()
                 if new_traces:
+                    source_idx = i  # Track the watcher index
                     break
 
             # If we have new traces, preprocess them fully
@@ -137,9 +142,11 @@ def _data_loader_worker(watchers, queue, stop_event, roll_cfg, pol_manifest):
                         )
                         preprocessed_episodes.append(ep)
 
-                # Put preprocessed episodes in queue
+                # Put preprocessed episodes and source info in queue
+                # First watcher (index 0) is "current", others are "background"
                 if preprocessed_episodes:
-                    queue.put(preprocessed_episodes)
+                    source = "current" if source_idx == 0 else "background"
+                    queue.put((preprocessed_episodes, source))
             else:
                 # No new data, sleep briefly
                 time.sleep(0.1)
@@ -225,6 +232,7 @@ def main():
             reward_agg=roll_cfg.get("reward_agg", "sum"),
             buffer_max=roll_cfg.get("buffer_max", 10_000_000),
             interference_vals = interference_vals,
+            episode_length = roll_cfg.get("episode_length", EPISOID_LENGTH),
             writer = writer,
             capacity = 10000 if args.batch_rl else 20000,
         )
@@ -256,10 +264,12 @@ def main():
         def _extend_with_new():
             # Try to poll from primary watcher first, then fallback watchers
             new_traces, interference_vals = [], []
+            source_idx = -1  # Track which watcher provided the data
 
             for i, watcher in enumerate(watchers):
                 new_traces, interference_vals = watcher.poll_new_traces()
                 if new_traces:
+                    source_idx = i
                     break
 
             # If no new traces and reuse is enabled, try to reload from any watcher
@@ -268,14 +278,17 @@ def main():
                     # Check if we have seen traces to reuse (after initial loading)
                     if len(watcher._seen) > 0:
                         new_traces, interference_vals = watcher.reset_and_reload_all()
-                        # Shuffle to vary the order
                         if new_traces:
+                            source_idx = i  # Track which watcher we're reloading from
+                            # Shuffle to vary the order
                             import random
                             random.shuffle(new_traces)
                             random.shuffle(interference_vals)
                             break
 
             if new_traces != []:
+                # First watcher (index 0) is "current", others are "background"
+                source = "current" if source_idx == 0 else "background"
                 policy.buf.extend(
                     new_traces,
                     device="cuda",
@@ -283,7 +296,8 @@ def main():
                     advantage_estimator=roll_cfg.get("advantage_estimator"),
                     gamma=pol_manifest.get("gamma"),
                     lam=roll_cfg.get("lam"),
-                    interference_vals = interference_vals,
+                    interference_vals=interference_vals,
+                    source=source,  # Pass source parameter
                 )
                 return True
             return False
@@ -329,11 +343,13 @@ def main():
                     if not args.batch_rl:
                         # Try to get preprocessed episodes from queue without blocking
                         try:
-                            preprocessed_episodes = data_queue.get_nowait()
-                            if preprocessed_episodes:
+                            result = data_queue.get_nowait()
+                            if result:
+                                # Unpack (preprocessed_episodes, source) tuple
+                                preprocessed_episodes, source = result
                                 # Fast insertion - all CPU work already done in background
-                                policy.buf.add_preprocessed_episodes(preprocessed_episodes)
-                                print(f"[Main] Added {len(preprocessed_episodes)} preprocessed episodes to buffer")
+                                policy.buf.add_preprocessed_episodes(preprocessed_episodes, source=source)
+                                # print(f"[Main] Added {len(preprocessed_episodes)} preprocessed episodes (source={source}) to buffer")
                         except:
                             # Queue is empty, will try again next epoch
                             pass
