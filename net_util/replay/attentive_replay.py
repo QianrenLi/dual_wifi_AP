@@ -6,12 +6,24 @@ episodes based on their similarity to the most recent episode. Uses cosine
 similarity between the last N timesteps of observations to bias sampling.
 """
 
-from typing import List, Optional, Iterable
+from typing import List, Optional, Iterable, Dict
 from net_util import register_buffer
 import torch as th
 import numpy as np
 import random
 import math
+
+
+# =============================================================================
+# Episode Source Types
+# =============================================================================
+
+class EpisodeSource:
+    """Source type for episodes - determines eligibility as query episode."""
+
+    CURRENT = "current"          # Online/current experience (used as query)
+    BACKGROUND = "background"    # Offline/background dataset (candidates only)
+    OFFLINE = "offline"          # Other offline sources (candidates only)
 
 
 # Import Episode class and helper functions from rnn_fifo
@@ -113,6 +125,10 @@ class AttentiveReplayBuffer:
         self._next_insert: int = 0
         self._query_episode: Optional[Episode] = None
 
+        # CORE: Source-aware tracking (distinguishes current vs background episodes)
+        self._episode_sources: Dict[int, str] = {}  # Maps episode index -> source
+        self.current_ep_idx: Optional[int] = None  # Index of the current episode (used as query)
+
         # API compatibility: Unused parameters (kept for drop-in replacement)
         self.alpha = float(alpha)
         self.beta = float(beta0)
@@ -130,13 +146,19 @@ class AttentiveReplayBuffer:
     # -------------------------------------------------------------------------
     # CORE: Attentive Replay Internal Methods
     # -------------------------------------------------------------------------
-    def _push(self, ep: Episode):
+    def _push(self, ep: Episode, source: str = EpisodeSource.BACKGROUND):
         """
-        FIFO insert with query episode tracking.
+        FIFO insert with source-aware query episode tracking.
 
         Args:
             ep: Episode to insert
+            source: Source type ("current", "background", or "offline")
         """
+        # Track evicted episode for cleanup
+        evicted_idx = None
+        if len(self.heap) >= self.capacity and self.capacity > 0:
+            evicted_idx = self._next_insert
+
         if len(self.heap) < self.capacity:
             ep._heap_idx = len(self.heap)
             self.heap.append(ep)
@@ -145,8 +167,22 @@ class AttentiveReplayBuffer:
             self.heap[self._next_insert] = ep
             ep._heap_idx = self._next_insert
 
-        # CORE: Update query episode to the most recently added one
-        self._query_episode = ep
+        # CORE: Track episode source
+        self._episode_sources[ep._heap_idx] = source
+
+        # CORE: Update current episode tracker ONLY if source is "current"
+        # New current episode becomes the query (replaces previous)
+        if source == EpisodeSource.CURRENT:
+            self.current_ep_idx = ep._heap_idx
+
+        # CORE: Cleanup evicted episode from tracking
+        if evicted_idx is not None:
+            # Remove from episode sources
+            if evicted_idx in self._episode_sources:
+                del self._episode_sources[evicted_idx]
+            # If the current episode was evicted, clear the tracker
+            if evicted_idx == self.current_ep_idx:
+                self.current_ep_idx = None
 
         # Advance circular pointer
         if self.capacity > 0:
@@ -188,11 +224,14 @@ class AttentiveReplayBuffer:
 
     def _choose_episode_ids(self, batch_size: int):
         """
-        CORE: Sample episodes using attention-based selection.
+        CORE: Sample episodes using source-aware attention-based selection.
 
         Two-phase sampling:
         1. Sample lambda_val * batch_size candidate episodes uniformly
-        2. Select batch_size most similar to the query episode
+        2. Select batch_size most similar to the query episode (most recent current episode)
+
+        Query episode is the most recent "current" episode.
+        Background episodes are never used as query (only as candidates).
 
         Optimization: When n_candidates <= batch_size, skip similarity computation
         since all candidates will be selected anyway.
@@ -210,8 +249,13 @@ class AttentiveReplayBuffer:
             chosen = np.random.choice(idxs, size=batch_size, replace=True)
             return chosen.tolist(), None
 
-        # Edge case: query episode not set yet
-        if self._query_episode is None:
+        # CORE: Use current episode as query if available
+        # If no current episode exists, fall back to uniform sampling
+        if self.current_ep_idx is not None:
+            # Use the tracked current episode as query
+            self._query_episode = self.heap[self.current_ep_idx]
+        else:
+            # No current episode - fall back to uniform sampling
             idxs = np.arange(N, dtype=np.int64)
             chosen = np.random.choice(idxs, size=batch_size, replace=True)
             return chosen.tolist(), None
@@ -367,6 +411,7 @@ class AttentiveReplayBuffer:
         traces,
         reward_agg="sum",
         init_loss: Optional[float] = None,
+        source: str = EpisodeSource.BACKGROUND,  # NEW: source parameter
         **kwargs
     ):
         """Extend buffer with multiple traces."""
@@ -374,7 +419,7 @@ class AttentiveReplayBuffer:
         for (states, actions, rewards, network_output), interf in zip(traces, interfs):
             self.add_episode(
                 states, actions, rewards, network_output,
-                reward_agg, init_loss, interf
+                reward_agg, init_loss, interf, source
             )
 
     def add_episode(
@@ -385,7 +430,8 @@ class AttentiveReplayBuffer:
         network_output,
         reward_agg="sum",
         init_loss: Optional[float] = None,
-        interference=0
+        interference=0,
+        source: str = EpisodeSource.BACKGROUND  # NEW: source parameter
     ):
         """Add a single episode to the buffer."""
         obs_np, act_np, rew_np, next_obs_np, done_np = _tracify(
@@ -419,13 +465,17 @@ class AttentiveReplayBuffer:
                 if self.writer is not None:
                     self.writer.add_scalar("data/return", self.run_return, self.data_num)
 
-            # FIFO insert with query tracking
-            self._push(ep)
+            # FIFO insert with source-aware query tracking
+            self._push(ep, source)
 
-    def add_preprocessed_episodes(self, episodes: List[Episode]):
+    def add_preprocessed_episodes(
+        self,
+        episodes: List[Episode],
+        source: str = EpisodeSource.BACKGROUND  # NEW: source parameter
+    ):
         """Fast insertion method for pre-processed Episode objects."""
         for ep in episodes:
-            self._push(ep)
+            self._push(ep, source)
 
     # -------------------------------------------------------------------------
     # API COMPATIBILITY: No-op Methods (not used for attentive replay)
