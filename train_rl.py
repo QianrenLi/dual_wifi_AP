@@ -20,6 +20,11 @@ from typing import List
 #------------------------------ Constants ---------------------------
 EPISOID_LENGTH = 350
 
+# TraceWatcher method names
+METHOD_POLL_NEW_TRACES = "poll_new_traces"
+METHOD_LOAD_INITIAL_TRACES = "load_initial_traces"
+METHOD_RESET_AND_RELOAD_ALL = "reset_and_reload_all"
+
 
 # ----------------------------- Helpers -----------------------------
 def _coerce_to_type(val: Any, typ) -> Any:
@@ -105,12 +110,8 @@ def _data_loader_worker(watchers, queue, stop_event, roll_cfg, pol_manifest):
             new_traces, interference_vals = [], []
             source_idx = -1  # Track which watcher provided the data
 
-            # Try to poll from primary watcher first, then fallback watchers
-            for i, watcher in enumerate(watchers):
-                new_traces, interference_vals = watcher.poll_new_traces()
-                if new_traces:
-                    source_idx = i  # Track the watcher index
-                    break
+            # Try to poll from primary watcher first, then randomly from fallback watchers
+            new_traces, interference_vals, source_idx = _poll_from_watchers(watchers, METHOD_POLL_NEW_TRACES)
 
             # If we have new traces, preprocess them fully
             if new_traces:
@@ -163,6 +164,80 @@ def _data_loader_worker(watchers, queue, stop_event, roll_cfg, pol_manifest):
         print(f"[DataLoader] Error: {e}")
 
 
+# ----------------------------- Helper Functions -----------------------------
+def _poll_from_watchers(watchers, method_name=METHOD_POLL_NEW_TRACES, shuffle_result=False):
+    """
+    Poll from watchers: try primary first, then randomly try fallback watchers.
+
+    Args:
+        watchers: List of TraceWatcher objects
+        method_name: Name of the method to call on each watcher
+        shuffle_result: If True, shuffle the returned traces
+
+    Returns:
+        tuple: (traces, interference_vals, source_idx)
+    """
+    import random
+
+    # Try primary watcher first
+    method = getattr(watchers[0], method_name)
+    new_traces, interference_vals = method()
+    source_idx = 0 if new_traces else -1
+
+    # If primary has no data, randomly try fallback watchers
+    if not new_traces and len(watchers) > 1:
+        fallback_indices = list(range(1, len(watchers)))
+        random.shuffle(fallback_indices)
+        for i in fallback_indices:
+            method = getattr(watchers[i], method_name)
+            new_traces, interference_vals = method()
+            if new_traces:
+                source_idx = i
+                break
+
+    # Shuffle results if requested (for reuse_traces)
+    if shuffle_result and new_traces:
+        random.shuffle(new_traces)
+        random.shuffle(interference_vals)
+
+    return new_traces, interference_vals, source_idx
+
+
+def _reload_from_watchers(watchers):
+    """
+    Reload from watchers: try primary first, then randomly try fallback watchers.
+    Only tries watchers that have seen traces (len(_seen) > 0).
+
+    Returns:
+        tuple: (traces, interference_vals, source_idx)
+    """
+    import random
+
+    # Try primary watcher first
+    if len(watchers[0]._seen) > 0:
+        new_traces, interference_vals = getattr(watchers[0], METHOD_RESET_AND_RELOAD_ALL)()
+        source_idx = 0 if new_traces else -1
+    else:
+        new_traces, interference_vals = [], []
+        source_idx = -1
+
+    # If primary has no data, randomly try fallback watchers
+    if not new_traces and len(watchers) > 1:
+        fallback_indices = list(range(1, len(watchers)))
+        random.shuffle(fallback_indices)
+        for i in fallback_indices:
+            if len(watchers[i]._seen) > 0:
+                new_traces, interference_vals = getattr(watchers[i], METHOD_RESET_AND_RELOAD_ALL)()
+                if new_traces:
+                    source_idx = i
+                    # Shuffle to vary the order
+                    random.shuffle(new_traces)
+                    random.shuffle(interference_vals)
+                    break
+
+    return new_traces, interference_vals, source_idx
+
+
 # ----------------------------- Main -----------------------------
 def main():
     try:
@@ -206,18 +281,12 @@ def main():
             watcher = TraceWatcher([path], control_cfg, max_step=3)
             watchers.append(watcher)
 
-        # Try to load initial traces from primary source first, then fallback sources
-        init_traces, interference_vals = [], []
-        for watcher in watchers:
-            init_traces, interference_vals = watcher.load_initial_traces()
-            if init_traces:
-                break
+        # Try to load initial traces from primary source first, then randomly from fallback sources
+        init_traces, interference_vals, _ = _poll_from_watchers(watchers, METHOD_LOAD_INITIAL_TRACES)
+
         # If still empty, wait and retry
         while init_traces == []:
-            for watcher in watchers:
-                init_traces, interference_vals = watcher.load_initial_traces()
-                if init_traces:
-                    break
+            init_traces, interference_vals, _ = _poll_from_watchers(watchers, METHOD_LOAD_INITIAL_TRACES)
             if not init_traces:
                 time.sleep(1)
 
@@ -262,29 +331,12 @@ def main():
         actor_before = _flatten_params(policy.net.actor_parameters())
 
         def _extend_with_new():
-            # Try to poll from primary watcher first, then fallback watchers
-            new_traces, interference_vals = [], []
-            source_idx = -1  # Track which watcher provided the data
-
-            for i, watcher in enumerate(watchers):
-                new_traces, interference_vals = watcher.poll_new_traces()
-                if new_traces:
-                    source_idx = i
-                    break
+            # Try to poll from primary watcher first, then randomly from fallback watchers
+            new_traces, interference_vals, source_idx = _poll_from_watchers(watchers, METHOD_POLL_NEW_TRACES)
 
             # If no new traces and reuse is enabled, try to reload from any watcher
             if not new_traces and args.reuse_traces:
-                for i, watcher in enumerate(watchers):
-                    # Check if we have seen traces to reuse (after initial loading)
-                    if len(watcher._seen) > 0:
-                        new_traces, interference_vals = watcher.reset_and_reload_all()
-                        if new_traces:
-                            source_idx = i  # Track which watcher we're reloading from
-                            # Shuffle to vary the order
-                            import random
-                            random.shuffle(new_traces)
-                            random.shuffle(interference_vals)
-                            break
+                new_traces, interference_vals, source_idx = _reload_from_watchers(watchers)
 
             if new_traces != []:
                 # First watcher (index 0) is "current", others are "background"
