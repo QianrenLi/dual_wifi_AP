@@ -81,12 +81,15 @@ class SACRNNBeliefSeqDistV12_Config:
     log_interval: int = 50
     cdl_num_random: int = 10
     cdl_beta_cql_multiplier: float = 5 * 20
-    annealing_max_lb: float = 0.05
+    annealing_max_lb: float = 0.1
     annealing_epoch_max: float = 10
     sigma_k = 0.1
     
     MAX_BITRATE = 3e7
     MAX_OUTAGE = 1.0
+    # Mixed precision training
+    use_fp16: bool = False
+    fp16_opt_level: str = "O1"  # Not used with PyTorch AMP, kept for compat
 
 
 @register_policy
@@ -144,6 +147,11 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
         self._belief_h: Tensor | None = None
 
         self.actor_loss_scale_S: th.Tensor = th.tensor(1.0, device=self.device)
+        
+        # Mixed precision: GradScaler for FP16 training
+        self.grad_scaler = None
+        if cfg.use_fp16 and self.device.type == "cuda":
+            self.grad_scaler = th.cuda.amp.GradScaler()
 
 
     def _alpha(self) -> Tensor:
@@ -184,13 +192,27 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
 
         return self.actor_loss_scale_S
 
-    @staticmethod
-    def _step_with_clip(params_iterable, opt: th.optim.Optimizer, loss: Tensor, clip_norm: float | None) -> None:
+    def _step_with_clip(
+        self,
+        params_iterable,
+        opt: th.optim.Optimizer,
+        loss: Tensor,
+        clip_norm: float | None,
+        scaler: th.cuda.amp.GradScaler | None = None,
+    ) -> None:
         opt.zero_grad()
-        loss.backward()
-        if clip_norm is not None:
-            th.nn.utils.clip_grad_norm_(params_iterable, clip_norm)
-        opt.step()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if clip_norm is not None:
+                scaler.unscale_(opt)
+                th.nn.utils.clip_grad_norm_(params_iterable, clip_norm)
+            scaler.step(opt)
+            scaler.update()
+        else:
+            loss.backward()
+            if clip_norm is not None:
+                th.nn.utils.clip_grad_norm_(params_iterable, clip_norm)
+            opt.step()
 
     def _log_batch_stats(self, writer: SummaryWriter, step: int, **kwargs) -> None:
         writer.add_scalar("loss/actor", kwargs["a_loss"].item(), step)
@@ -475,7 +497,7 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
 
         ent_loss: Optional[Tensor] = None
 
-        burn_in = 50
+        burn_in = self.buf.episode_length // 10
         
         obs_TBD, act_TBA, rew_TB1, nxt_TBD, done_TB1, info = next(
             self.buf.get_sequences(self.cfg.batch_size, trace_length=100)
@@ -496,74 +518,81 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
         importance_weights: Tensor = info["is_weights"].squeeze(-1)
         interference: Tensor = info["interference"].squeeze(-1)
 
-        z_BH, _, mu_BH, logvar_BH = self.net.belief_encode(
-            obs_train, b_h=h_burn, is_evaluate=True
-        )
+        # Use autocast for forward passes when FP16 is enabled
+        autocast_ctx = th.cuda.amp.autocast(enabled=self.cfg.use_fp16 and self.device.type == "cuda")
 
-        # Actor now takes obs and latent directly
-        a_pi_TBA, logp_TB1, mu_TBA, std_TBA = self.net.action_compute(
-            obs_train, z_BH.detach(), return_stats=True
-        )
-        
+        with autocast_ctx:
+            z_BH, _, mu_BH, logvar_BH = self.net.belief_encode(
+                obs_train, b_h=h_burn, is_evaluate=True
+            )
+
+            # Actor now takes obs and latent directly
+            a_pi_TBA, logp_TB1, mu_TBA, std_TBA = self.net.action_compute(
+                obs_train, z_BH.detach(), return_stats=True
+            )
+
         if self.alpha_opt is not None:
-            ent_loss = self._alpha_loss(logp_TB1.detach())
-            self._step_with_clip([self.log_alpha], self.alpha_opt, ent_loss, clip_norm=5.0)  # type: ignore
-        
-        c_loss, c_loss_batch, _ = self._critic_loss(
-            obs_train,
-            z_BH.detach(),
-            act_train,
-            nxt_train,
-            rew_train,
-            done_train,
-            importance_weights,
-            b_h=h_burn,
-        )
-        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=10.0)
+            with autocast_ctx:
+                ent_loss = self._alpha_loss(logp_TB1.detach())
+            self._step_with_clip([self.log_alpha], self.alpha_opt, ent_loss, clip_norm=5.0, scaler=self.grad_scaler)  # type: ignore
+
+        with autocast_ctx:
+            c_loss, c_loss_batch, _ = self._critic_loss(
+                obs_train,
+                z_BH.detach(),
+                act_train,
+                nxt_train,
+                rew_train,
+                done_train,
+                importance_weights,
+                b_h=h_burn,
+            )
+        self._step_with_clip(self.net.critic_parameters(), self.critic_opt, c_loss, clip_norm=10.0, scaler=self.grad_scaler)
         self.net.soft_sync(self.cfg.tau)
 
-        with self.net.critics_frozen():
+        with self.net.critics_frozen(), autocast_ctx:
             a_loss, qmin_pi, qdist_avg = self._actor_loss(
                 obs_train, z_BH.detach(), a_pi_TBA, logp_TB1, returns_train=returns_train
             )
-            self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=5.0)
+        self._step_with_clip(self.net.actor_parameters(), self.actor_opt, a_loss, clip_norm=5.0, scaler=self.grad_scaler)
 
-            mu_mean = mu_TBA.mean(dim=(0, 1))
-            mu_std = mu_TBA.std(dim=(0, 1))
-            sigma_mean = std_TBA.mean(dim=(0, 1))
-            sigma_std = std_TBA.std(dim=(0, 1))
-            act_mean = a_pi_TBA.mean(dim=(0, 1))
-            act_std = a_pi_TBA.std(dim=(0, 1))
+        mu_mean = mu_TBA.mean(dim=(0, 1))
+        mu_std = mu_TBA.std(dim=(0, 1))
+        sigma_mean = std_TBA.mean(dim=(0, 1))
+        sigma_std = std_TBA.std(dim=(0, 1))
+        act_mean = a_pi_TBA.mean(dim=(0, 1))
+        act_std = a_pi_TBA.std(dim=(0, 1))
 
-            mu_region_stats: Dict[int, Tuple[Tensor, Tensor]] = {}
-            q_region_stats: Dict[int, Tensor] = {}
-            act_region_stats: Dict[int, Tensor] = {}
-            rew_region_stats: Dict[int, Tensor] = {}
+        mu_region_stats: Dict[int, Tuple[Tensor, Tensor]] = {}
+        q_region_stats: Dict[int, Tensor] = {}
+        act_region_stats: Dict[int, Tensor] = {}
+        rew_region_stats: Dict[int, Tensor] = {}
 
-            unique_regions = interference.unique()
-            q_B = qmin_pi.mean(dim=0).squeeze(-1)
-            rew_B = rew_train.mean(dim=0).squeeze(-1)
-            act_BA = a_pi_TBA.mean(dim=0)
+        unique_regions = interference.unique()
+        q_B = qmin_pi.mean(dim=0).squeeze(-1)
+        rew_B = rew_train.mean(dim=0).squeeze(-1)
+        act_BA = a_pi_TBA.mean(dim=0)
 
-            for r in unique_regions:
-                mask_B = interference == r
-                if mask_B.any():
-                    mu_region = mu_TBA[:, mask_B, :]
-                    mu_mean_r = mu_region.mean(dim=(0, 1))
-                    mu_std_r = mu_region.std(dim=(0, 1))
-                    mu_region_stats[int(r.item())] = (mu_mean_r, mu_std_r)
+        for r in unique_regions:
+            mask_B = interference == r
+            if mask_B.any():
+                mu_region = mu_TBA[:, mask_B, :]
+                mu_mean_r = mu_region.mean(dim=(0, 1))
+                mu_std_r = mu_region.std(dim=(0, 1))
+                mu_region_stats[int(r.item())] = (mu_mean_r, mu_std_r)
 
-                    q_region_stats[int(r.item())] = q_B[mask_B].mean()
-                    rew_region_stats[int(r.item())] = rew_B[mask_B].mean()
-                    act_region_stats[int(r.item())] = act_BA[mask_B].mean(dim=0)
+                q_region_stats[int(r.item())] = q_B[mask_B].mean()
+                rew_region_stats[int(r.item())] = rew_B[mask_B].mean()
+                act_region_stats[int(r.item())] = act_BA[mask_B].mean(dim=0)
 
         if self._global_step % 5 == 0:
-            z_BH, _, mu_BH, logvar_BH = self.net.belief_encode(obs_train, b_h=h_burn)
-            y_hat_B1 = self.net.belief_decode(z_BH)
-            b_loss, belief_stats = self._belief_loss(
-                y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch
-            )
-            self._step_with_clip(self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=5.0)
+            with autocast_ctx:
+                z_BH, _, mu_BH, logvar_BH = self.net.belief_encode(obs_train, b_h=h_burn)
+                y_hat_B1 = self.net.belief_decode(z_BH)
+                b_loss, belief_stats = self._belief_loss(
+                    y_hat_B1, mu_BH, logvar_BH, interference.unsqueeze(-1), epoch
+                )
+            self._step_with_clip(self.net.belief_parameters(), self.belief_opt, b_loss, clip_norm=5.0, scaler=self.grad_scaler)
 
             if self._global_step % self.cfg.log_interval == 0:
                 reward_mean = rew_train.mean().item()
@@ -621,7 +650,7 @@ class SACRNNBeliefSeqDistV12(PolicyBase):
             writer.flush()
             writer.close()
 
-        if self._global_step % 250 == 0:
+        if self._global_step % 50 == 0:
             return False
             
         return True
